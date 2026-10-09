@@ -96,7 +96,7 @@ Click **Save Settings** to persist your preferences across page reloads.
 2. Click **Start Bot**. The status will turn green (`Running`).
 3. If the item is out of stock, the bot will begin dual-mode monitoring (RedSky API + button observer).
 4. As soon as stock is detected, the bot automatically executes:
-   $$\text{Stock Detected} \longrightarrow \text{Add to Cart} \longrightarrow \text{Skip Add-ons} \longrightarrow \text{Checkout} \longrightarrow \text{Fill CVV} \longrightarrow \text{Place Order}$$
+   > **Stock Detected** → **Add to Cart** → **Skip Add-ons** → **Navigate to Checkout** → **Auto-fill CVV** → **Place Order**
 
 ---
 
@@ -146,7 +146,7 @@ Before relying on the bot for a live drop, test your setup safely:
 
 ## ⚙️ Advanced Configuration (Code Level)
 
-All timing thresholds and constants are cleanly declared at the top of [`Target Auto Buyer.js`](./Target%20Auto%20Buyer.js#L19-L45):
+All timing thresholds and constants are cleanly declared at the top of [`Target Auto Buyer.js`](./Target%20Auto%20Buyer.js):
 
 ```javascript
 const CFG = {
@@ -200,5 +200,3 @@ This tool is created for educational and personal automation purposes only. The 
 ## 📄 License
 
 This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
-#   T a r g e t - A u t o - B u y e r  
- 
