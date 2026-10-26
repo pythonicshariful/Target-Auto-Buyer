@@ -1,55 +1,50 @@
-# Target Auto Buyer ⚡ v3.0
+# Target Auto Buyer ⚡ v3.1
 
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-Supported-green.svg)](https://www.tampermonkey.net/)
 [![Platform](https://img.shields.io/badge/Platform-Target.com-CC0000.svg)](https://www.target.com)
-[![Version](https://img.shields.io/badge/Version-3.0_Turbo-blue.svg)](#features)
+[![Version](https://img.shields.io/badge/Version-3.1-blue.svg)](#features)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](#license)
 
-An ultra-fast, resilient userscript designed to automate product monitoring, carting, and checkout on **Target.com**. Specially engineered to win high-demand product drops (GPUs, game consoles, trading cards, limited-edition releases) where items sell out in seconds.
+An experimental browser userscript for monitoring Target product availability and assisting with cart and checkout steps. It is not an official Target product and cannot guarantee stock, successful checkout, or an order.
 
 ---
 
-## ⚡ What Makes v3.0 Different?
+## ⚡ Version 3.1
 
-Traditional bots poll every few seconds, reload entire pages when stock is spotted, and walk through checkout sequentially—wasting 12 to 20+ seconds.
-
-**Target Auto Buyer v3.0** minimizes the critical path down to **2–5 seconds**:
-- **Zero-Reload Stock Triggering:** The instant Target's backend API flags stock, the bot checks if the Add to Cart button is ready in the DOM without reloading the page—saving 2–5 seconds of HTML reflow.
-- **MutationObserver Cart Drawer:** Listens to Target's DOM mutations to detect "Added to cart" drawers in milliseconds, eliminating polling lag.
-- **Single-Pass Checkout Processing:** Fills credentials/CVV and clicks confirm buttons within the same 200ms cycle instead of waiting separate ticks.
-- **Dual-Mode Stock Monitoring:** RedSky API polling + button attribute observer run simultaneously.
-- **Adaptive Drop Countdown:** Set a target drop time; the bot maintains calm polling before switching to high-speed 250ms polling 30 seconds before release.
+Version 3.1 adds a movable, resizable, minimizable dashboard; stock-check log messages; and safer Place Order handling. Target may change its page or API at any time, so selectors and behavior can stop working without notice.
 
 ---
 
 ## 🚀 Key Features
 
 ### ⏱️ 1. Ultra-Low Latency & High-Speed Polling
-- **⚡ Drop Mode:** Fixed 250ms polling interval for immediate item acquisition during hot drops.
-- **Normal Polling Mode:** Configurable randomized intervals (500ms – 1500ms) for stealth monitoring.
-- **Adaptive Timer:** Input the scheduled drop time (e.g., `10:00:00 AM`). The bot displays a live countdown and auto-activates Drop Mode 30 seconds before the drop.
+- **⚡ Drop Mode:** Uses a 250ms API polling interval while enabled.
+- **Normal Polling Mode:** Uses a randomized interval between the configured minimum and maximum.
+- **Drop Timer:** Displays a countdown and uses 250ms polling during the configured 30 seconds before the drop time.
+- **Polling limits:** Rapid repeated requests may be rate-limited or blocked. Use monitoring only when needed.
 
 ### 🛒 2. Intelligent Add-to-Cart Flow
 - **Direct Cart Drawer Detection:** Targets the live Target slide-out drawer (`Added to cart`, `View cart & check out`, `custom-quantity-picker`).
 - **Auto-Decline Protection Plans:** Automatically dismisses warranty/protection plan modals without stalling the flow.
-- **Cart Page Auto-Advance:** If routed through `/cart`, instantly clicks the Checkout button without hesitation.
-- **ATC Retries:** Retries Add-to-Cart clicks up to 3 times before optimistically proceeding to checkout.
+- **Cart Page Auto-Advance:** Looks for a supported checkout button on the cart page.
+- **ATC Retries:** Retries when cart confirmation is not detected; after the retry limit it may continue to checkout without confirmed cart status. Verify the cart contents yourself.
 
 ### 💳 3. Rapid Single-Pass Checkout
 - **200ms Fast Execution Loop:** Continuously evaluates checkout state.
-- **Credentials & CVV Auto-Fill:** Simulates native React inputs (`dispatchEvent`) for password, CVV, and mobile verification bypass.
-- **Single Place Order Submission:** Clicks Place Order once to avoid duplicate submissions, then waits for an explicit confirmation signal.
-- **Order Status Verification:** Reports success only when a recognized order-confirmation element or heading appears; otherwise asks you to verify the order manually.
-- **Cart-Empty Error Recovery:** Detects if an item was claimed during checkout and returns gracefully to retry.
+- **CVV Auto-Fill:** Fills the CVV field when configured. Login, mandatory verification, CAPTCHA, and other prompts may require manual action.
+- **Single Place Order Submission:** Clicks Place Order once per loaded checkout page, then waits for an explicit confirmation signal. A page reload starts a new script page session, so the bot cannot guarantee duplicate prevention across reloads.
+- **Best-Effort Order Status:** Looks for specific confirmation elements/headings while the checkout handler is running. If checkout ends without detecting one, it asks you to verify the order manually. Confirmation detection may fail if Target changes its page or navigation.
+- **Cart Error Detection:** Detects some item-removed and sold-out messages. It does not guarantee recovery or a successful retry.
 
 ### 📊 4. Diagnostics & Live HUD
-- **Real-Time Floating Control Panel:** Clean, draggable dashboard with Target red styling.
+- **Real-Time Floating Control Panel:** Drag the header to move the dashboard; use Large/Compact and minimize/restore controls. Its position and size preferences are saved.
+- **Live Stock Log:** Displays each API stock-check attempt and its result; keeps the most recent 300 log lines.
 - **Live Performance Metrics:** Tracks timestamps and calculates latency for each stage:
   - `Stock → ATC`
   - `ATC → Cart Confirmed`
   - `Cart → Checkout Started`
-  - `Total Time to Order Confirmation`
-- **Pre-Warming Session Check:** Tests Target session cookies (`/co-cart`) on startup to ensure you're authenticated before the drop.
+  - `Total Time to Order Confirmation` when confirmation is detected
+- **Session Check:** Checks the `/co-cart` endpoint before starting. This does not guarantee that your session is authenticated or that checkout will succeed.
 
 ---
 
@@ -73,7 +68,7 @@ Install one of the following browser extensions on Chrome, Edge, Brave, or Firef
 ## 📖 How to Use
 
 ### 1. Pre-Drop Preparation (Crucial!)
-To guarantee maximum checkout speed:
+Before running the bot:
 1. **Log in to your Target account** prior to the drop.
 2. Ensure you have a **default shipping address** and **default payment card** saved in your Target wallet.
 3. Make sure you know your card's **CVV**.
@@ -84,13 +79,12 @@ Navigate to any Target product page (e.g. `https://www.target.com/p/...`). A flo
 | Setting | Description | Recommended Setting |
 |---|---|---|
 | **CVV** | 3 or 4 digit security code for your saved card. | Your card's CVV |
-| **Password** | Your Target account password (for re-auth prompts). | Your account password |
-| **Max Price ($)** | Safety ceiling; bot won't purchase if price is higher. | Product MSRP + 10% |
+| **Max Price ($)** | Attempts to hold when the product page price is above the entered amount. **This is not a reliable purchase limit; do not rely on it as a safety control.** | Set a value, but verify price yourself |
 | **Quantity** | Number of items to select (1–10). | `1` |
-| **Drop Mode (⚡)** | Toggles ultra-aggressive 250ms polling. | Enabled during drops |
+| **Drop Mode (⚡)** | Toggles 250ms API polling. | Enable only when needed |
 | **Drop Time** | Date & time when the item goes live. | Set to scheduled release time |
 
-Click **Save Settings** to persist your preferences across page reloads.
+Settings are saved as they are changed via the userscript manager. The dashboard currently provides a CVV field; it does not provide a password field.
 
 Use the **Large / Compact** button in the dashboard header to resize the panel, or the **−** button to minimize it; these preferences are remembered. Drag the header to move the dashboard, and its position is saved. While monitoring, each stock-check attempt and its result appears in the dashboard log.
 
@@ -98,7 +92,10 @@ Use the **Large / Compact** button in the dashboard header to resize the panel, 
 1. Navigate to the product page you want to monitor.
 2. Click **Start Bot**. The status will turn green (`Running`).
 3. If the item is out of stock, the bot will begin dual-mode monitoring (RedSky API + button observer). The observer will not click while the product page still reports “Out of Stock,” even if an ATC-like control is present.
-4. Once the out-of-stock status clears and an enabled ATC control is available, the bot can add the item to cart and proceed through supported checkout prompts. It submits Place Order once, then reports success only after it detects an order-confirmation message. If checkout ends without a recognized confirmation, verify your Target account before trying again.
+4. Once the out-of-stock status clears and an enabled ATC control is available, the bot may attempt to add the item to cart and proceed through supported checkout prompts.
+5. The bot submits Place Order at most once while the current checkout page remains loaded. It may show **Awaiting Confirmation**. If a recognized confirmation appears while its checkout handler is active, it reports **Order Confirmed**; if checkout ends without one, verify your Target account and email before taking any further action. Never click Place Order again just because the bot status is uncertain. A page reload starts a new script page session, so duplicate prevention is not guaranteed across reloads.
+
+**Important:** The Max Price setting is not a guaranteed purchase cap. The stock-monitoring flow may still attempt to add an item when the page price is above the configured amount. Do not leave the bot unattended or rely on the price setting to prevent an unwanted purchase. Verify the item, price, quantity, shipping, and payment details before any order submission.
 
 ---
 
@@ -108,19 +105,19 @@ Use the **Large / Compact** button in the dashboard header to resize the panel, 
 flowchart TD
     A[Product Page Loaded] --> B{Item in Stock?}
     B -- No --> C[Dual-Mode Monitoring]
-    C -->|API Polling 250-500ms| D{Stock Detected?}
+    C -->|API polling at configured interval| D{Stock Detected?}
     C -->|DOM Mutation Observer| D
     D -- No --> C
     D -- Yes --> E{Out-of-stock status cleared?}
     E -- No --> C
     E -- Yes --> F{ATC Button Ready on DOM?}
     F -- Yes --> G[Click ATC Immediately]
-    F -- No --> H[Fast Reload Page] --> G
+    F -- No --> H[Reload Page] --> G
     B -- Yes --> G
     G --> I[MutationObserver Listens for Cart Drawer]
     I -->|Cart Confirmed / Timeout| J[Instant Redirect to /checkout]
     J --> K{Checkout Screen}
-    K -->|Password Prompt| L[Auto-fill Password & Click Login]
+    K -->|Sign-in or verification prompt| L[Complete prompt manually if required]
     K -->|CVV Prompt| M[Auto-fill CVV & Confirm in 1 Pass]
     K -->|Review Order| N[Click Place Order]
     N --> O{Confirmation detected?}
@@ -130,20 +127,15 @@ flowchart TD
 
 ---
 
-## 🧪 Safe Testing & Dry Run Guide
+## 🧪 Safe Testing Guide
 
-Before relying on the bot for a live drop, test your setup safely:
+Test the interface without placing an order:
 
-1. **Test Stock & Carting:**
-   - Go to any cheap in-stock item (e.g. a $1 household product).
-   - Set **Max Price** to `$0.50`.
-   - Start the bot. Notice that it correctly holds and monitors without purchasing because price exceeds the limit.
-2. **Checkout Safety:**
-   - Do not use a live Place Order submission as a dry run; an order may be accepted even if the page responds slowly.
-   - For a safe test, verify the dashboard and checkout navigation, then stop the bot before submitting Place Order.
-3. **Verify Drop Timer:**
-   - Set the **Drop Time** to 1 minute in the future.
-   - Watch the countdown tick down. Confirm that it turns yellow and switches to high-speed mode 30 seconds before 0:00.
+1. Open a product page and check that the dashboard appears.
+2. Test the Large/Compact, minimize/restore, and drag controls.
+3. Set a future Drop Time and confirm the countdown updates.
+4. If testing cart or checkout navigation, stop the bot before Place Order. Do not use an incorrect CVV as a dry run; a real order may still be accepted or the result may be ambiguous.
+5. Treat Max Price as informational only, not as protection against an unintended purchase.
 
 ---
 
@@ -157,7 +149,7 @@ const CFG = {
     POLL_MAX_MS:            1500,     // Normal max polling interval
     DROP_MODE_POLL_MS:       250,     // Ultra-aggressive drop interval
     ADAPTIVE_LEAD_SEC:        30,     // Seconds before drop time to trigger drop mode
-    API_MAX_RETRIES:           3,     // API retry attempts on 5xx errors
+    API_MAX_RETRIES:           3,     // API retries on server/network errors
     API_RETRY_BASE_MS:       150,     // Backoff base for retries
     ATC_MAX_RETRIES:           3,     // Max ATC click attempts
     CART_CONFIRM_TIMEOUT_MS: 4000,    // Wait before optimistic checkout jump
@@ -172,18 +164,18 @@ const CFG = {
 ## ❓ Frequently Asked Questions
 
 <details>
-<summary><b>Does Target block or ban accounts for using this?</b></summary>
-The script runs entirely inside your regular browser session using your authentic cookies, headers, and browser fingerprint. It behaves like an ultra-fast human user. However, running ultra-aggressive polling for hours continuously may trigger temporary rate limits or CAPTCHAs. Use Drop Mode specifically around drop windows.
+<summary><b>Could monitoring be rate-limited?</b></summary>
+Yes. Frequent requests may be limited or blocked, and Target may present additional verification. Use the bot only when needed and follow Target's applicable terms.
 </details>
 
 <details>
-<summary><b>What happens if a CAPTCHA appears?</b></summary>
-If Target prompts for an Arkose Labs / FunCaptcha challenge, you must solve it manually in the browser window. Once solved, the bot automatically resumes its flow.
+<summary><b>What happens if a CAPTCHA or verification prompt appears?</b></summary>
+The bot does not solve CAPTCHAs or mandatory verification challenges. Complete any supported prompt manually and check the page before continuing.
 </details>
 
 <details>
-<summary><b>What if Target asks for SMS or email 2-step verification?</b></summary>
-The script automatically clicks the "Skip" button if optional prompts appear. If a mandatory 2FA code is sent to your phone, enter the code manually; the bot continues immediately after you submit it.
+<summary><b>Does an order-confirmed status guarantee a successful purchase?</b></summary>
+No. Detection depends on the current Target page structure and can fail or misidentify a page. Verify orders in your Target account and confirmation email.
 </details>
 
 <details>
@@ -195,7 +187,7 @@ Yes! The script uses isolated tab-level running states (`sessionStorage`), meani
 
 ## ⚠️ Disclaimer
 
-This tool is created for educational and personal automation purposes only. The user is solely responsible for compliance with Target's Terms of Service. Automating purchases carries risks of unintended transactions—always verify prices and quantities before activating the bot on high-value products.
+This tool is experimental, is not affiliated with Target, and is provided without guarantees. Automated purchasing may be restricted by Target's terms. You are responsible for reviewing and confirming all order details. Do not rely on this script for price protection, purchase confirmation, or unattended ordering.
 
 ---
 
