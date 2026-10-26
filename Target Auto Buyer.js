@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Target Auto Buyer
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  Auto buy from target.com — optimized for high-demand drops
 // @author       Pythonic Shariful
 // @match        https://www.target.com/*
@@ -34,8 +34,6 @@
 
         // Checkout
         CHECKOUT_INTERVAL_MS:   200,     // Checkout loop speed (was 500ms)
-        PLACE_ORDER_RETRY_MS:   750,     // Retry delay for Place Order button (was 3-5s)
-
         // Startup
         STARTUP_POLL_MS:        100,     // How often to check if page is ready
         STARTUP_MAX_WAIT_MS:   5000,     // Max wait for page ready before proceeding anyway
@@ -97,7 +95,9 @@
             const time = now.toLocaleTimeString('en-US', {
                 hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
             }) + '.' + String(now.getMilliseconds()).padStart(3, '0');
-            logArea.textContent += `[${time}] ${message}\n`;
+            const lines = logArea.textContent ? logArea.textContent.split('\n') : [];
+            lines.push(`[${time}] ${message}`);
+            logArea.textContent = lines.slice(-300).join('\n');
             logArea.scrollTop = logArea.scrollHeight;
         }
     };
@@ -112,7 +112,7 @@
         checkoutLoop:         null,
         pollTimeout:          null,
         cartTimeout:          null,
-        placeOrderTimeout:    null,
+        placeOrderError:      null,
         domObserver:          null,      // Phase 4: dual-mode DOM observer
         sessionValid:         null,      // Phase 4: pre-warm result
         dropTimerInterval:    null,      // Phase 4: drop timer countdown
@@ -121,13 +121,13 @@
     function stopAllTimers() {
         clearTimeout(state.pollTimeout);
         clearTimeout(state.cartTimeout);
-        clearTimeout(state.placeOrderTimeout);
         if (state.cartObserver) { state.cartObserver.disconnect(); state.cartObserver = null; }
         if (state.checkoutLoop) { clearInterval(state.checkoutLoop); state.checkoutLoop = null; }
         if (state.domObserver)  { state.domObserver.disconnect(); state.domObserver = null; }
         if (state.dropTimerInterval) { clearInterval(state.dropTimerInterval); state.dropTimerInterval = null; }
         state.atcRetries = 0;
         state.placeOrderAttempted = false;
+        state.placeOrderError = null;
     }
 
     // =====================================================================
@@ -163,7 +163,9 @@
     function isDisabled(el) {
         if (!el) return true;
         if (el.disabled) return true;
-        return (el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+        if ((el.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return true;
+        if ((el.getAttribute('data-component-state') || '').toLowerCase() === 'disabled') return true;
+        return /\.disabled$/i.test(el.id || '');
     }
 
     /** Set a React-controlled input's value without React swallowing the change */
@@ -256,6 +258,9 @@
     //  FIND ADD-TO-CART BUTTON — comprehensive selector list from live DOM
     // =====================================================================
     function findATCButton() {
+        // Target may render an ATC-shaped control before its fulfillment state updates.
+        if (isOutOfStock()) return null;
+
         // Primary: data-test shipping button
         let btn = $('button[data-test="shippingButton"]');
         if (btn && isVisible(btn) && !isDisabled(btn)) return btn;
@@ -329,12 +334,14 @@
     async function pollStock(tcin) {
         if (!getTabRunning()) return;
         metrics.pollCount++;
+        const pollNumber = metrics.pollCount;
+        console.log(`Target Bot: Checking stock for TCIN ${tcin} (check #${pollNumber})...`);
 
         const inStock = await checkStockApi(tcin);
 
         if (inStock) {
             metrics.stockDetectedAt = Date.now();
-            console.log(`Target Bot: ✅ IN STOCK detected via API! (poll #${metrics.pollCount})`);
+            console.log(`Target Bot: ✅ IN STOCK detected via API! (check #${pollNumber})`);
 
             // Phase 1.2: Try to click ATC directly WITHOUT page reload
             const btn = findATCButton();
@@ -349,6 +356,8 @@
             window.location.reload();
             return;
         }
+
+        console.log(`Target Bot: No in-stock result yet (check #${pollNumber}).`);
 
         // Schedule next poll
         const interval = getPollInterval();
@@ -485,6 +494,23 @@
         window.location.href = 'https://www.target.com/checkout';
     }
 
+    function hasOrderConfirmation() {
+        const confirmation = $('[data-test="orderConfirmation"], [data-test="order-confirmation"]');
+        if (confirmation && isVisible(confirmation)) return true;
+
+        const confirmationHeading = xpath(
+            "//*[self::h1 or self::h2][contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'thank you for your order') or contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'order confirmation')]"
+        );
+        return Boolean(confirmationHeading && isVisible(confirmationHeading));
+    }
+
+    function stopWithOrderStatus(message, statusText) {
+        console.log(`Target Bot: ${message}`);
+        setTabRunning(false);
+        stopAllTimers();
+        updateStatusUI(false, statusText);
+    }
+
     // =====================================================================
     //  PRODUCT PAGE HANDLER — orchestrates stock check → ATC → checkout
     // =====================================================================
@@ -570,20 +596,22 @@
         state.checkoutLoop = setInterval(() => {
             if (!getTabRunning()) {
                 clearInterval(state.checkoutLoop); state.checkoutLoop = null;
-                clearTimeout(state.placeOrderTimeout);
                 return;
             }
 
             const url = window.location.href;
 
-            // === SUCCESS — navigated away from checkout (order confirmation) ===
-            if (!url.includes('/checkout') && !url.includes('/co-')) {
+            if (hasOrderConfirmation()) {
                 metrics.orderPlacedAt = Date.now();
-                console.log('Target Bot: 🎉 ORDER PLACED SUCCESSFULLY!');
+                console.log('Target Bot: 🎉 Order confirmation detected.');
                 console.log(`Target Bot: Metrics — ${metrics.summary()}`);
-                setTabRunning(false);
-                stopAllTimers();
-                updateStatusUI(false, '✅ Order Placed!');
+                stopWithOrderStatus('Order confirmed successfully.', '✅ Order Confirmed');
+                return;
+            }
+
+            // Leaving checkout alone does not prove the order was accepted.
+            if (!url.includes('/checkout') && !url.includes('/co-')) {
+                stopWithOrderStatus('Checkout ended without a recognized order confirmation. Verify your Target account before retrying.', '⚠️ Verify Order');
                 return;
             }
 
@@ -650,29 +678,22 @@
                 if (cvvField.value === cvv) return; // Wait for confirm button
             }
 
-            // 5. Place Order (P1.5 — fast retry)
+            // Submit only once; a slow response must not create a duplicate order.
             const placeBtn = $('button[data-test="placeOrderButton"]');
             if (placeBtn && !isDisabled(placeBtn) && isVisible(placeBtn)) {
                 if (!state.placeOrderAttempted) {
                     state.placeOrderAttempted = true;
-                    metrics.orderPlacedAt = Date.now(); // Tentative — may update on success
+                    state.placeOrderError = null;
                     placeBtn.click();
-                    console.log('Target Bot: 🛍️ PLACE ORDER clicked (first attempt)!');
-                    return;
-                }
-
-                // Fast retry (P1.5)
-                if (!state.placeOrderTimeout) {
-                    console.log(`Target Bot: Place Order still visible. Retrying in ${CFG.PLACE_ORDER_RETRY_MS}ms...`);
-                    state.placeOrderTimeout = setTimeout(() => {
-                        state.placeOrderTimeout = null;
-                        if (!getTabRunning()) return;
-                        const btn = $('button[data-test="placeOrderButton"]');
-                        if (btn && !isDisabled(btn) && isVisible(btn)) {
-                            btn.click();
-                            console.log('Target Bot: 🛍️ Retried Place Order');
-                        }
-                    }, CFG.PLACE_ORDER_RETRY_MS);
+                    console.log('Target Bot: 🛍️ Place Order submitted once. Waiting for confirmation...');
+                    updateStatusUI(true, '⏳ Awaiting Confirmation');
+                } else {
+                    const error = $('[data-test="error-message"]');
+                    const errorMessage = error && isVisible(error) ? error.textContent.trim() : '';
+                    if (errorMessage && errorMessage !== state.placeOrderError) {
+                        state.placeOrderError = errorMessage;
+                        console.log(`Target Bot: ⚠️ Checkout returned an error after submission: ${errorMessage}`);
+                    }
                 }
             }
         }, CFG.CHECKOUT_INTERVAL_MS);
@@ -761,7 +782,11 @@
         const el = $('#bot-status');
         if (!el) return;
         el.innerText = customText || (running ? 'Running' : 'Stopped');
-        el.style.color = running ? '#16a34a' : '#b91c1c';
+        el.style.color = customText && customText.startsWith('✅')
+            ? '#16a34a'
+            : customText && customText.startsWith('⚠️')
+                ? '#d97706'
+                : running ? '#16a34a' : '#b91c1c';
     }
 
     function updateMetricsUI() {
@@ -792,15 +817,63 @@
                 box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
                 overflow: hidden;
                 backdrop-filter: blur(8px);
+                transition: width 160ms ease;
+            }
+            #target-bot-ui.tb-minimized .tb-card {
+                width: auto;
+            }
+            #target-bot-ui.tb-minimized .tb-body {
+                display: none;
+            }
+            #target-bot-ui.tb-large .tb-card {
+                width: 460px;
+            }
+            #target-bot-ui .tb-size-toggle {
+                border: 1px solid rgba(255, 255, 255, 0.35);
+                border-radius: 999px;
+                padding: 4px 8px;
+                background: rgba(255, 255, 255, 0.16);
+                color: inherit;
+                font: inherit;
+                font-size: 10px;
+                font-weight: 700;
+                cursor: pointer;
             }
             #target-bot-ui .tb-header {
                 padding: 12px 14px;
                 background: linear-gradient(135deg, #cc0000 0%, #ff3b30 100%);
                 color: #ffffff;
                 display: flex;
-                align-items: baseline;
+                align-items: center;
                 justify-content: space-between;
                 gap: 12px;
+                cursor: grab;
+                user-select: none;
+                touch-action: none;
+            }
+            #target-bot-ui .tb-header:active {
+                cursor: grabbing;
+            }
+            #target-bot-ui .tb-header-actions {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            #target-bot-ui .tb-icon-btn {
+                width: 26px;
+                height: 26px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                border: 1px solid rgba(255, 255, 255, 0.35);
+                border-radius: 8px;
+                padding: 0;
+                background: rgba(255, 255, 255, 0.16);
+                color: inherit;
+                font: inherit;
+                font-size: 17px;
+                line-height: 1;
+                cursor: pointer;
             }
             #target-bot-ui .tb-title {
                 font-size: 14px;
@@ -883,11 +956,14 @@
             #target-bot-ui .tb-log {
                 width: 100%;
                 height: 120px;
+                max-height: 30vh;
                 border-radius: 12px;
                 border: 1px solid rgba(17, 24, 39, 0.12);
-                background: rgba(17, 24, 39, 0.03);
+                background: #111827;
+                color: #e5e7eb;
                 font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
                 font-size: 11px;
+                line-height: 1.5;
                 overflow-y: auto;
                 padding: 10px 10px;
                 box-sizing: border-box;
@@ -975,17 +1051,35 @@
                 color: #9ca3af;
                 margin: 12px 0 6px;
             }
+            @media (max-width: 520px) {
+                #target-bot-ui {
+                    right: 8px;
+                    bottom: 8px;
+                }
+                #target-bot-ui .tb-card,
+                #target-bot-ui.tb-large .tb-card {
+                    width: min(460px, calc(100vw - 16px));
+                }
+            }
         `);
 
         const ui = document.createElement('div');
         ui.id = 'target-bot-ui';
+        const isLarge = GM_getValue('uiSize', 'compact') === 'large';
+        const isMinimized = GM_getValue('uiMinimized', false);
+        ui.classList.toggle('tb-large', isLarge);
+        ui.classList.toggle('tb-minimized', isMinimized);
         ui.innerHTML = `
             <div class="tb-card">
                 <div class="tb-header">
                     <div class="tb-title">Target Auto Buyer</div>
-                    <div class="tb-pill">v3.0 ⚡</div>
+                    <div class="tb-header-actions">
+                        <div class="tb-pill">v3.1 ⚡</div>
+                        <button id="bot-size-toggle" class="tb-size-toggle" type="button" aria-label="Switch panel size">${isLarge ? 'Compact' : 'Large'}</button>
+                        <button id="bot-minimize-toggle" class="tb-icon-btn" type="button" aria-controls="bot-panel-body" aria-expanded="${!isMinimized}" aria-label="${isMinimized ? 'Restore panel' : 'Minimize panel'}">${isMinimized ? '□' : '−'}</button>
+                    </div>
                 </div>
-                <div class="tb-body">
+                <div id="bot-panel-body" class="tb-body">
                     <div class="tb-grid-2">
                         <div class="tb-field">
                             <label class="tb-label" for="bot-qty">Quantity</label>
@@ -1051,6 +1145,79 @@
             </div>
         `;
         document.body.appendChild(ui);
+
+        const keepUIInViewport = () => {
+            const rect = ui.getBoundingClientRect();
+            const left = Math.min(Math.max(0, rect.left), Math.max(0, window.innerWidth - ui.offsetWidth));
+            const top = Math.min(Math.max(0, rect.top), Math.max(0, window.innerHeight - ui.offsetHeight));
+            ui.style.left = `${left}px`;
+            ui.style.top = `${top}px`;
+            ui.style.right = 'auto';
+            ui.style.bottom = 'auto';
+            return { left, top };
+        };
+
+        const savedPosition = GM_getValue('uiPosition', null);
+        if (savedPosition && Number.isFinite(savedPosition.left) && Number.isFinite(savedPosition.top)) {
+            const maxLeft = Math.max(0, window.innerWidth - ui.offsetWidth);
+            const maxTop = Math.max(0, window.innerHeight - ui.offsetHeight);
+            ui.style.left = `${Math.min(Math.max(0, savedPosition.left), maxLeft)}px`;
+            ui.style.top = `${Math.min(Math.max(0, savedPosition.top), maxTop)}px`;
+            ui.style.right = 'auto';
+            ui.style.bottom = 'auto';
+        }
+
+        const header = ui.querySelector('.tb-header');
+        let dragState = null;
+        header.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || event.target.closest('button')) return;
+            const rect = ui.getBoundingClientRect();
+            dragState = {
+                pointerId: event.pointerId,
+                offsetX: event.clientX - rect.left,
+                offsetY: event.clientY - rect.top,
+            };
+            header.setPointerCapture(event.pointerId);
+        });
+        header.addEventListener('pointermove', event => {
+            if (!dragState || event.pointerId !== dragState.pointerId) return;
+            const left = Math.min(Math.max(0, event.clientX - dragState.offsetX), Math.max(0, window.innerWidth - ui.offsetWidth));
+            const top = Math.min(Math.max(0, event.clientY - dragState.offsetY), Math.max(0, window.innerHeight - ui.offsetHeight));
+            ui.style.left = `${left}px`;
+            ui.style.top = `${top}px`;
+            ui.style.right = 'auto';
+            ui.style.bottom = 'auto';
+        });
+        const stopDragging = event => {
+            if (!dragState || event.pointerId !== dragState.pointerId) return;
+            dragState = null;
+            const rect = ui.getBoundingClientRect();
+            GM_setValue('uiPosition', { left: rect.left, top: rect.top });
+        };
+        header.addEventListener('pointerup', stopDragging);
+        header.addEventListener('pointercancel', stopDragging);
+        window.addEventListener('resize', () => {
+            GM_setValue('uiPosition', keepUIInViewport());
+        });
+
+        $('#bot-size-toggle').addEventListener('click', () => {
+            const large = !ui.classList.contains('tb-large');
+            ui.classList.toggle('tb-large', large);
+            GM_setValue('uiSize', large ? 'large' : 'compact');
+            $('#bot-size-toggle').textContent = large ? 'Compact' : 'Large';
+            $('#bot-size-toggle').setAttribute('aria-label', large ? 'Use compact panel' : 'Use large panel');
+            GM_setValue('uiPosition', keepUIInViewport());
+        });
+
+        $('#bot-minimize-toggle').addEventListener('click', () => {
+            const minimized = !ui.classList.contains('tb-minimized');
+            ui.classList.toggle('tb-minimized', minimized);
+            GM_setValue('uiMinimized', minimized);
+            $('#bot-minimize-toggle').textContent = minimized ? '□' : '−';
+            $('#bot-minimize-toggle').setAttribute('aria-expanded', String(!minimized));
+            $('#bot-minimize-toggle').setAttribute('aria-label', minimized ? 'Restore panel' : 'Minimize panel');
+            GM_setValue('uiPosition', keepUIInViewport());
+        });
 
         // --- Wire up input persistence ---
         const save = () => {

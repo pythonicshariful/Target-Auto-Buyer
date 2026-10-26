@@ -38,7 +38,8 @@ Traditional bots poll every few seconds, reload entire pages when stock is spott
 ### 💳 3. Rapid Single-Pass Checkout
 - **200ms Fast Execution Loop:** Continuously evaluates checkout state.
 - **Credentials & CVV Auto-Fill:** Simulates native React inputs (`dispatchEvent`) for password, CVV, and mobile verification bypass.
-- **Sub-Second Place Order Retry:** Retries the final "Place your order" click every 750ms if network congestion delays order submission.
+- **Single Place Order Submission:** Clicks Place Order once to avoid duplicate submissions, then waits for an explicit confirmation signal.
+- **Order Status Verification:** Reports success only when a recognized order-confirmation element or heading appears; otherwise asks you to verify the order manually.
 - **Cart-Empty Error Recovery:** Detects if an item was claimed during checkout and returns gracefully to retry.
 
 ### 📊 4. Diagnostics & Live HUD
@@ -47,7 +48,7 @@ Traditional bots poll every few seconds, reload entire pages when stock is spott
   - `Stock → ATC`
   - `ATC → Cart Confirmed`
   - `Cart → Checkout Started`
-  - `Total Time to Place Order`
+  - `Total Time to Order Confirmation`
 - **Pre-Warming Session Check:** Tests Target session cookies (`/co-cart`) on startup to ensure you're authenticated before the drop.
 
 ---
@@ -91,12 +92,13 @@ Navigate to any Target product page (e.g. `https://www.target.com/p/...`). A flo
 
 Click **Save Settings** to persist your preferences across page reloads.
 
+Use the **Large / Compact** button in the dashboard header to resize the panel, or the **−** button to minimize it; these preferences are remembered. Drag the header to move the dashboard, and its position is saved. While monitoring, each stock-check attempt and its result appears in the dashboard log.
+
 ### 3. Launching the Bot
 1. Navigate to the product page you want to monitor.
 2. Click **Start Bot**. The status will turn green (`Running`).
-3. If the item is out of stock, the bot will begin dual-mode monitoring (RedSky API + button observer).
-4. As soon as stock is detected, the bot automatically executes:
-   > **Stock Detected** → **Add to Cart** → **Skip Add-ons** → **Navigate to Checkout** → **Auto-fill CVV** → **Place Order**
+3. If the item is out of stock, the bot will begin dual-mode monitoring (RedSky API + button observer). The observer will not click while the product page still reports “Out of Stock,” even if an ATC-like control is present.
+4. Once the out-of-stock status clears and an enabled ATC control is available, the bot can add the item to cart and proceed through supported checkout prompts. It submits Place Order once, then reports success only after it detects an order-confirmation message. If checkout ends without a recognized confirmation, verify your Target account before trying again.
 
 ---
 
@@ -109,19 +111,21 @@ flowchart TD
     C -->|API Polling 250-500ms| D{Stock Detected?}
     C -->|DOM Mutation Observer| D
     D -- No --> C
-    D -- Yes --> E{ATC Button Ready on DOM?}
-    E -- Yes --> F[Click ATC Immediately]
-    E -- No --> G[Fast Reload Page] --> F
-    B -- Yes --> F
-    F --> H[MutationObserver Listens for Cart Drawer]
-    H -->|Cart Confirmed / Timeout| I[Instant Redirect to /checkout]
-    I --> J{Checkout Screen}
-    J -->|Password Prompt| K[Auto-fill Password & Click Login]
-    J -->|CVV Prompt| L[Auto-fill CVV & Confirm in 1 Pass]
-    J -->|Review Order| M[Click Place Order]
-    M --> N{Order Succeeded?}
-    N -- No --> O[Fast Retry in 750ms] --> M
-    N -- Yes --> P[🎉 Order Placed Successfully]
+    D -- Yes --> E{Out-of-stock status cleared?}
+    E -- No --> C
+    E -- Yes --> F{ATC Button Ready on DOM?}
+    F -- Yes --> G[Click ATC Immediately]
+    F -- No --> H[Fast Reload Page] --> G
+    B -- Yes --> G
+    G --> I[MutationObserver Listens for Cart Drawer]
+    I -->|Cart Confirmed / Timeout| J[Instant Redirect to /checkout]
+    J --> K{Checkout Screen}
+    K -->|Password Prompt| L[Auto-fill Password & Click Login]
+    K -->|CVV Prompt| M[Auto-fill CVV & Confirm in 1 Pass]
+    K -->|Review Order| N[Click Place Order]
+    N --> O{Confirmation detected?}
+    O -- Yes --> P[🎉 Order Confirmed]
+    O -- No --> Q[Stop and Verify Order Manually]
 ```
 
 ---
@@ -134,10 +138,9 @@ Before relying on the bot for a live drop, test your setup safely:
    - Go to any cheap in-stock item (e.g. a $1 household product).
    - Set **Max Price** to `$0.50`.
    - Start the bot. Notice that it correctly holds and monitors without purchasing because price exceeds the limit.
-2. **Dry Run Checkout:**
-   - Enter an **incorrect CVV** (e.g. `999`).
-   - Run the bot on an in-stock test item.
-   - The bot will add to cart, proceed to checkout, and attempt payment, but the order will be safely rejected by your bank due to the test CVV.
+2. **Checkout Safety:**
+   - Do not use a live Place Order submission as a dry run; an order may be accepted even if the page responds slowly.
+   - For a safe test, verify the dashboard and checkout navigation, then stop the bot before submitting Place Order.
 3. **Verify Drop Timer:**
    - Set the **Drop Time** to 1 minute in the future.
    - Watch the countdown tick down. Confirm that it turns yellow and switches to high-speed mode 30 seconds before 0:00.
@@ -159,7 +162,6 @@ const CFG = {
     ATC_MAX_RETRIES:           3,     // Max ATC click attempts
     CART_CONFIRM_TIMEOUT_MS: 4000,    // Wait before optimistic checkout jump
     CHECKOUT_INTERVAL_MS:    200,     // Checkout cycle tick rate
-    PLACE_ORDER_RETRY_MS:    750,     // Place order re-click delay
     STARTUP_POLL_MS:         100,     // Fast startup poll interval
     STARTUP_MAX_WAIT_MS:    5000,     // Max wait for initial page elements
 };
