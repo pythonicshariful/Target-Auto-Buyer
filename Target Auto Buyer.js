@@ -1,13 +1,17 @@
 // ==UserScript==
 // @name         Target Auto Buyer
 // @namespace    http://tampermonkey.net/
-// @version      3.1
-// @description  Auto buy from target.com — optimized for high-demand drops
+// @version      3.2
+// @description  Auto buy from target.com — optimized for high-demand drops with Discord, Telegram, and Audio alerts
 // @author       Pythonic Shariful
 // @match        https://www.target.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      discord.com
+// @connect      discordapp.com
+// @connect      api.telegram.org
 // ==/UserScript==
 
 (function() {
@@ -185,6 +189,464 @@
     }
 
     // =====================================================================
+    //  PRODUCT TITLE EXTRACTION
+    // =====================================================================
+    function getProductTitle() {
+        const titleEl = $('h1[data-test="product-title"]') || $('[data-test="product-title"]') || $('h1');
+        if (titleEl && titleEl.textContent.trim()) {
+            return titleEl.textContent.trim();
+        }
+        const cleanDocTitle = (document.title || '').replace(/\s*:\s*Target$/i, '').trim();
+        return cleanDocTitle || 'Target Product';
+    }
+
+    // =====================================================================
+    //  HTTP TRANSPORT — GM_xmlhttpRequest with fetch fallback
+    // =====================================================================
+    function httpRequest(options) {
+        return new Promise((resolve, reject) => {
+            const gmXhr = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest :
+                          (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') ? GM.xmlHttpRequest : null;
+            if (gmXhr) {
+                gmXhr({
+                    method: options.method || 'GET',
+                    url: options.url,
+                    headers: options.headers || {},
+                    data: options.data,
+                    timeout: options.timeout || 10000,
+                    onload: (res) => {
+                        if (res.status >= 200 && res.status < 300) {
+                            resolve(res.responseText);
+                        } else {
+                            reject(new Error(`HTTP ${res.status}: ${res.responseText || res.statusText}`));
+                        }
+                    },
+                    onerror: (err) => reject(new Error(err?.error || err?.statusText || 'Network request failed')),
+                    ontimeout: () => reject(new Error('Request timed out')),
+                });
+            } else if (typeof fetch === 'function') {
+                fetch(options.url, {
+                    method: options.method || 'GET',
+                    headers: options.headers || {},
+                    body: options.data,
+                })
+                .then(async res => {
+                    if (res.ok) resolve(await res.text());
+                    else reject(new Error(`HTTP ${res.status}: ${await res.text()}`));
+                })
+                .catch(reject);
+            } else {
+                reject(new Error('No HTTP transport available'));
+            }
+        });
+    }
+
+    // =====================================================================
+    //  AUDIO NOTIFICATION SYSTEM (Web Audio API Synthesizer)
+    // =====================================================================
+    const Sound = {
+        ctx: null,
+        getContext() {
+            if (!this.ctx) {
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (AudioCtx) {
+                    this.ctx = new AudioCtx();
+                }
+            }
+            if (this.ctx && this.ctx.state === 'suspended') {
+                this.ctx.resume().catch(() => {});
+            }
+            return this.ctx;
+        },
+
+        playTone(freq, type, duration, startTime = 0, gainLevel = 0.15) {
+            const ctx = this.getContext();
+            if (!ctx) return;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+
+            osc.type = type || 'sine';
+            osc.frequency.setValueAtTime(freq, ctx.currentTime + startTime);
+
+            gain.gain.setValueAtTime(gainLevel, ctx.currentTime + startTime);
+            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + startTime + duration);
+
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+
+            osc.start(ctx.currentTime + startTime);
+            osc.stop(ctx.currentTime + startTime + duration);
+        },
+
+        // Stock alert: Ascending arpeggio (C5 -> E5 -> G5 -> C6)
+        stockAlert() {
+            if (!GM_getValue('soundEnabled', true)) return;
+            try {
+                this.playTone(523.25, 'triangle', 0.12, 0.00, 0.22); // C5
+                this.playTone(659.25, 'triangle', 0.12, 0.10, 0.22); // E5
+                this.playTone(783.99, 'triangle', 0.12, 0.20, 0.22); // G5
+                this.playTone(1046.50, 'sine',     0.35, 0.30, 0.28); // C6
+            } catch (e) {
+                console.log(`Target Bot: Audio playback error: ${e.message}`);
+            }
+        },
+
+        // Cart alert: Positive two-tone chime
+        cartAlert() {
+            if (!GM_getValue('soundEnabled', true)) return;
+            try {
+                this.playTone(783.99, 'sine', 0.15, 0.00, 0.20); // G5
+                this.playTone(1046.50, 'sine', 0.25, 0.12, 0.25); // C6
+            } catch (e) {
+                console.log(`Target Bot: Audio playback error: ${e.message}`);
+            }
+        },
+
+        // Order Confirmed: Victory fanfare chord
+        orderConfirmedAlert() {
+            if (!GM_getValue('soundEnabled', true)) return;
+            try {
+                this.playTone(523.25, 'triangle', 0.12, 0.00, 0.25); // C5
+                this.playTone(523.25, 'triangle', 0.12, 0.12, 0.25); // C5
+                this.playTone(523.25, 'triangle', 0.12, 0.24, 0.25); // C5
+                this.playTone(659.25, 'triangle', 0.20, 0.36, 0.28); // E5
+                this.playTone(783.99, 'sine',     0.22, 0.54, 0.30); // G5
+                this.playTone(1046.50, 'sine',    0.55, 0.72, 0.35); // C6
+            } catch (e) {
+                console.log(`Target Bot: Audio playback error: ${e.message}`);
+            }
+        },
+
+        // Error / Alert: Double alert pulse
+        errorAlert() {
+            if (!GM_getValue('soundEnabled', true)) return;
+            try {
+                this.playTone(330, 'sawtooth', 0.20, 0.00, 0.15);
+                this.playTone(260, 'sawtooth', 0.30, 0.18, 0.18);
+            } catch (e) {
+                console.log(`Target Bot: Audio playback error: ${e.message}`);
+            }
+        }
+    };
+
+    // =====================================================================
+    //  DISCORD & TELEGRAM WEBHOOK NOTIFIERS
+    // =====================================================================
+    function escapeHtml(str) {
+        return String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    async function sendDiscordNotification(event, details = {}) {
+        const webhookUrl = GM_getValue('discordWebhook', '').trim();
+        if (!webhookUrl) return;
+
+        const colors = {
+            stock:     0x22c55e, // Vibrant Green
+            cart:      0x3b82f6, // Bright Blue
+            submitted: 0xf59e0b, // Amber Warning/Pending
+            order:     0x10b981, // Emerald Celebration
+            error:     0xef4444, // Red Alert
+            test:      0x8b5cf6, // Violet
+        };
+
+        const titles = {
+            stock:     '🚨 TARGET IN-STOCK DETECTED',
+            cart:      '🛒 ITEM ADDED TO CART',
+            submitted: '🛍️ CHECKOUT SUBMITTED',
+            order:     '🎉 ORDER CONFIRMED SUCCESSFULLY',
+            error:     '⚠️ TARGET BOT WARNING / ERROR',
+            test:      '🧪 DISCORD WEBHOOK TEST SUCCESSFUL',
+        };
+
+        const embedFields = [];
+        if (details.productName) {
+            embedFields.push({ name: '📦 Product', value: `[${details.productName}](${details.url || window.location.href})`, inline: false });
+        }
+        if (details.tcin) {
+            embedFields.push({ name: '🔢 TCIN', value: `\`${details.tcin}\``, inline: true });
+        }
+        if (details.price) {
+            embedFields.push({ name: '💰 Price', value: `**${details.price}**`, inline: true });
+        }
+        if (details.qty) {
+            embedFields.push({ name: '🛒 Qty', value: `\`${details.qty}\``, inline: true });
+        }
+        if (details.metrics) {
+            embedFields.push({ name: '⚡ Latency / Timing', value: `\`${details.metrics}\``, inline: false });
+        }
+        if (details.customFields && Array.isArray(details.customFields)) {
+            embedFields.push(...details.customFields);
+        }
+
+        const embed = {
+            title: details.title || titles[event] || 'Target Auto Buyer Notification',
+            description: details.message || (details.url ? `[View Product on Target.com](${details.url})` : ''),
+            url: details.url || window.location.href,
+            color: colors[event] || 0xcc0000,
+            fields: embedFields,
+            thumbnail: {
+                url: 'https://assets.targetimg1.com/web/static-resources/favicons/favicon.ico'
+            },
+            footer: {
+                text: 'Target Auto Buyer ⚡ v3.2 • High-Demand Drop Assist',
+                icon_url: 'https://assets.targetimg1.com/web/static-resources/favicons/favicon.ico'
+            },
+            timestamp: new Date().toISOString(),
+        };
+
+        const payload = JSON.stringify({
+            username: 'Target Auto Buyer',
+            avatar_url: 'https://assets.targetimg1.com/web/static-resources/favicons/favicon.ico',
+            embeds: [embed],
+        });
+
+        try {
+            await httpRequest({
+                method: 'POST',
+                url: webhookUrl,
+                headers: { 'Content-Type': 'application/json' },
+                data: payload,
+            });
+            console.log(`Target Bot: 💬 Discord embed notification sent (${event})`);
+        } catch (err) {
+            console.log(`Target Bot: ⚠️ Discord notification failed: ${err.message}`);
+            throw err;
+        }
+    }
+
+    async function sendTelegramNotification(event, details = {}) {
+        const token = GM_getValue('telegramToken', '').trim();
+        const chatId = GM_getValue('telegramChatId', '').trim();
+        if (!token || !chatId) return;
+
+        const eventHeaders = {
+            stock:     '🚨 <b>TARGET ITEM IN-STOCK!</b>',
+            cart:      '🛒 <b>ADDED TO CART!</b>',
+            submitted: '🛍️ <b>ORDER SUBMITTED!</b>',
+            order:     '🎉 <b>ORDER CONFIRMED!</b>',
+            error:     '⚠️ <b>BOT ALERT / ATTENTION NEEDED</b>',
+            test:      '🧪 <b>TELEGRAM INTEGRATION TEST</b>',
+        };
+
+        const header = eventHeaders[event] || '🎯 <b>TARGET AUTO BUYER ALERT</b>';
+
+        let text = `${header}\n`;
+        text += `━━━━━━━━━━━━━━━━━━━━\n`;
+
+        if (details.productName) {
+            text += `📦 <b>Product:</b> <i>${escapeHtml(details.productName)}</i>\n`;
+        }
+        if (details.tcin) {
+            text += `🔢 <b>TCIN:</b> <code>${escapeHtml(String(details.tcin))}</code>\n`;
+        }
+        if (details.price) {
+            text += `💰 <b>Price:</b> <code>${escapeHtml(String(details.price))}</code>\n`;
+        }
+        if (details.qty) {
+            text += `🛒 <b>Quantity:</b> <code>${escapeHtml(String(details.qty))}</code>\n`;
+        }
+        if (details.metrics) {
+            text += `⚡ <b>Latency:</b> <code>${escapeHtml(details.metrics)}</code>\n`;
+        }
+        if (details.message) {
+            text += `\n💬 <b>Details:</b> ${escapeHtml(details.message)}\n`;
+        }
+        if (details.url) {
+            text += `\n🔗 <a href="${details.url}"><b>👉 View on Target.com</b></a>\n`;
+        }
+
+        const now = new Date().toLocaleTimeString('en-US', { hour12: false });
+        text += `━━━━━━━━━━━━━━━━━━━━\n`;
+        text += `⏰ <i>${now} • Target Auto Buyer ⚡ v3.2</i>`;
+
+        const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`;
+        const payload = JSON.stringify({
+            chat_id: chatId,
+            text: text,
+            parse_mode: 'HTML',
+            disable_web_page_preview: false,
+        });
+
+        try {
+            await httpRequest({
+                method: 'POST',
+                url: url,
+                headers: { 'Content-Type': 'application/json' },
+                data: payload,
+            });
+            console.log(`Target Bot: ✈️ Telegram notification sent (${event})`);
+        } catch (err) {
+            console.log(`Target Bot: ⚠️ Telegram notification failed: ${err.message}`);
+            throw err;
+        }
+    }
+
+    const Notifier = {
+        lastStockNoticeTime: 0,
+        lastCartNoticeTime: 0,
+        lastOrderNoticeTime: 0,
+
+        async notifyStock(tcin, price) {
+            const now = Date.now();
+            if (now - this.lastStockNoticeTime < 10000) return;
+            this.lastStockNoticeTime = now;
+
+            const title = getProductTitle();
+            const url = window.location.href;
+            const qty = GM_getValue('qty', '1');
+            const priceStr = price ? `$${price}` : 'Check PDP';
+
+            Sound.stockAlert();
+
+            if (GM_getValue('discordEnabled', false) && GM_getValue('notifyStock', true)) {
+                sendDiscordNotification('stock', {
+                    title: '🚨 TARGET ITEM IN-STOCK!',
+                    message: `Product is in-stock! Attempting immediate add-to-cart...`,
+                    productName: title,
+                    tcin: tcin,
+                    price: priceStr,
+                    qty: qty,
+                    url: url,
+                }).catch(() => {});
+            }
+
+            if (GM_getValue('telegramEnabled', false) && GM_getValue('notifyStock', true)) {
+                sendTelegramNotification('stock', {
+                    message: 'Stock detected on Target! Auto-buying initiated.',
+                    productName: title,
+                    tcin: tcin,
+                    price: priceStr,
+                    qty: qty,
+                    url: url,
+                }).catch(() => {});
+            }
+        },
+
+        async notifyCart(tcin) {
+            const now = Date.now();
+            if (now - this.lastCartNoticeTime < 10000) return;
+            this.lastCartNoticeTime = now;
+
+            const title = getProductTitle();
+            const url = window.location.href;
+            const elapsed = metrics.atcClickedAt ? `${((Date.now() - metrics.atcClickedAt) / 1000).toFixed(2)}s` : 'Instant';
+
+            Sound.cartAlert();
+
+            if (GM_getValue('discordEnabled', false) && GM_getValue('notifyCart', true)) {
+                sendDiscordNotification('cart', {
+                    title: '🛒 ADDED TO CART CONFIRMED!',
+                    message: `Item added to cart in **${elapsed}**! Redirecting to checkout...`,
+                    productName: title,
+                    tcin: tcin || extractTcin(),
+                    url: url,
+                    metrics: `ATC→Cart: ${elapsed}`,
+                }).catch(() => {});
+            }
+
+            if (GM_getValue('telegramEnabled', false) && GM_getValue('notifyCart', true)) {
+                sendTelegramNotification('cart', {
+                    message: `Item successfully placed in cart in ${elapsed}. Heading to checkout!`,
+                    productName: title,
+                    tcin: tcin || extractTcin(),
+                    url: url,
+                    metrics: `ATC→Cart: ${elapsed}`,
+                }).catch(() => {});
+            }
+        },
+
+        async notifyOrderPlaced() {
+            const title = getProductTitle();
+            const url = window.location.href;
+            const tcin = extractTcin();
+
+            if (GM_getValue('discordEnabled', false) && GM_getValue('notifyOrder', true)) {
+                sendDiscordNotification('submitted', {
+                    title: '🛍️ PLACE ORDER SUBMITTED!',
+                    message: `Place Order clicked once. Waiting for order confirmation page...`,
+                    productName: title,
+                    tcin: tcin,
+                    url: url,
+                }).catch(() => {});
+            }
+
+            if (GM_getValue('telegramEnabled', false) && GM_getValue('notifyOrder', true)) {
+                sendTelegramNotification('submitted', {
+                    message: 'Place Order button submitted. Awaiting confirmation.',
+                    productName: title,
+                    tcin: tcin,
+                    url: url,
+                }).catch(() => {});
+            }
+        },
+
+        async notifyOrderConfirmed() {
+            const now = Date.now();
+            if (now - this.lastOrderNoticeTime < 30000) return;
+            this.lastOrderNoticeTime = now;
+
+            const title = getProductTitle();
+            const url = window.location.href;
+            const tcin = extractTcin();
+            const timingSummary = metrics.summary();
+
+            Sound.orderConfirmedAlert();
+
+            if (GM_getValue('discordEnabled', false) && GM_getValue('notifyOrder', true)) {
+                sendDiscordNotification('order', {
+                    title: '🎉 TARGET ORDER CONFIRMED!',
+                    message: `Target order placed and confirmed successfully! Verify your confirmation email.`,
+                    productName: title,
+                    tcin: tcin,
+                    url: url,
+                    metrics: timingSummary,
+                    customFields: [
+                        { name: '✅ Status', value: 'Order Accepted & Confirmed', inline: true }
+                    ]
+                }).catch(() => {});
+            }
+
+            if (GM_getValue('telegramEnabled', false) && GM_getValue('notifyOrder', true)) {
+                sendTelegramNotification('order', {
+                    message: 'Order confirmed by Target! Check your email and Target order history.',
+                    productName: title,
+                    tcin: tcin,
+                    url: url,
+                    metrics: timingSummary,
+                }).catch(() => {});
+            }
+        },
+
+        async notifyError(message) {
+            Sound.errorAlert();
+            const title = getProductTitle();
+            const url = window.location.href;
+
+            if (GM_getValue('discordEnabled', false) && GM_getValue('notifyError', true)) {
+                sendDiscordNotification('error', {
+                    title: '⚠️ TARGET BOT ALERT / ATTENTION',
+                    message: message,
+                    productName: title,
+                    tcin: extractTcin(),
+                    url: url,
+                }).catch(() => {});
+            }
+
+            if (GM_getValue('telegramEnabled', false) && GM_getValue('notifyError', true)) {
+                sendTelegramNotification('error', {
+                    message: message,
+                    productName: title,
+                    tcin: extractTcin(),
+                    url: url,
+                }).catch(() => {});
+            }
+        }
+    };
+
+    // =====================================================================
     //  POLL INTERVAL — respects drop-mode and adaptive timing (P4.3)
     // =====================================================================
     function getPollInterval() {
@@ -342,6 +804,7 @@
         if (inStock) {
             metrics.stockDetectedAt = Date.now();
             console.log(`Target Bot: ✅ IN STOCK detected via API! (check #${pollNumber})`);
+            Notifier.notifyStock(tcin, getCurrentPrice());
 
             // Phase 1.2: Try to click ATC directly WITHOUT page reload
             const btn = findATCButton();
@@ -381,6 +844,7 @@
             if (btn) {
                 console.log('Target Bot: ✅ ATC button appeared in DOM! Clicking immediately.');
                 metrics.stockDetectedAt = metrics.stockDetectedAt || Date.now();
+                Notifier.notifyStock(tcin, getCurrentPrice());
                 clearTimeout(state.pollTimeout); // Stop API polling
                 state.domObserver.disconnect();
                 state.domObserver = null;
@@ -466,6 +930,7 @@
                 metrics.cartConfirmedAt = Date.now();
                 const elapsed = metrics.atcClickedAt ? ((metrics.cartConfirmedAt - metrics.atcClickedAt) / 1000).toFixed(2) : '?';
                 console.log(`Target Bot: ✅ Cart confirmed! (${elapsed}s) → Checkout`);
+                Notifier.notifyCart(extractTcin());
 
                 clearTimeout(state.cartTimeout);
                 if (state.cartObserver) { state.cartObserver.disconnect(); state.cartObserver = null; }
@@ -568,6 +1033,7 @@
         if (btn) {
             metrics.stockDetectedAt = metrics.stockDetectedAt || Date.now();
             console.log('Target Bot: 🛒 ATC button found — clicking!');
+            Notifier.notifyStock(extractTcin(), currentPrice);
             beginAddToCart(btn);
         } else {
             // Button not available yet — start dual-mode monitoring
@@ -605,12 +1071,14 @@
                 metrics.orderPlacedAt = Date.now();
                 console.log('Target Bot: 🎉 Order confirmation detected.');
                 console.log(`Target Bot: Metrics — ${metrics.summary()}`);
+                Notifier.notifyOrderConfirmed();
                 stopWithOrderStatus('Order confirmed successfully.', '✅ Order Confirmed');
                 return;
             }
 
             // Leaving checkout alone does not prove the order was accepted.
             if (!url.includes('/checkout') && !url.includes('/co-')) {
+                Notifier.notifyError('Checkout ended without a recognized order confirmation. Verify your Target account.');
                 stopWithOrderStatus('Checkout ended without a recognized order confirmation. Verify your Target account before retrying.', '⚠️ Verify Order');
                 return;
             }
@@ -620,6 +1088,7 @@
                 const t = (msg.textContent || '').toLowerCase();
                 if (t.includes('removed') || t.includes('empty') || t.includes('no longer available') || t.includes('sold out')) {
                     console.log('Target Bot: ⚠️ Item removed from cart during checkout! Going back...');
+                    Notifier.notifyError('Item was removed from cart or sold out during checkout!');
                     clearInterval(state.checkoutLoop); state.checkoutLoop = null;
                     window.history.back();
                     return;
@@ -687,6 +1156,7 @@
                     placeBtn.click();
                     console.log('Target Bot: 🛍️ Place Order submitted once. Waiting for confirmation...');
                     updateStatusUI(true, '⏳ Awaiting Confirmation');
+                    Notifier.notifyOrderPlaced();
                 } else {
                     const error = $('[data-test="error-message"]');
                     const errorMessage = error && isVisible(error) ? error.textContent.trim() : '';
@@ -818,6 +1288,9 @@
                 overflow: hidden;
                 backdrop-filter: blur(8px);
                 transition: width 160ms ease;
+                max-height: 90vh;
+                display: flex;
+                flex-direction: column;
             }
             #target-bot-ui.tb-minimized .tb-card {
                 width: auto;
@@ -892,6 +1365,8 @@
             }
             #target-bot-ui .tb-body {
                 padding: 12px 14px 14px;
+                overflow-y: auto;
+                max-height: calc(90vh - 54px);
             }
             #target-bot-ui .tb-grid-2 {
                 display: grid;
@@ -1051,6 +1526,62 @@
                 color: #9ca3af;
                 margin: 12px 0 6px;
             }
+            #target-bot-ui .tb-accordion-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 9px 10px;
+                background: rgba(17, 24, 39, 0.04);
+                border: 1px solid rgba(17, 24, 39, 0.09);
+                border-radius: 10px;
+                cursor: pointer;
+                font-size: 12px;
+                font-weight: 700;
+                color: #1f2937;
+                margin: 10px 0 6px;
+                user-select: none;
+                transition: background 140ms ease;
+            }
+            #target-bot-ui .tb-accordion-header:hover {
+                background: rgba(17, 24, 39, 0.08);
+            }
+            #target-bot-ui .tb-accordion-body {
+                padding: 4px 2px 8px;
+                display: none;
+            }
+            #target-bot-ui .tb-accordion-body.open {
+                display: block;
+            }
+            #target-bot-ui .tb-test-btn {
+                padding: 5px 10px;
+                border-radius: 8px;
+                font-size: 11px;
+                font-weight: 700;
+                border: 1px solid rgba(17, 24, 39, 0.15);
+                background: #ffffff;
+                color: #374151;
+                cursor: pointer;
+                transition: all 120ms ease;
+            }
+            #target-bot-ui .tb-test-btn:hover {
+                background: #f3f4f6;
+                border-color: #9ca3af;
+            }
+            #target-bot-ui .tb-checkbox-group {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 6px;
+                margin-top: 6px;
+                font-size: 11px;
+                font-weight: 600;
+                color: #4b5563;
+            }
+            #target-bot-ui .tb-checkbox-item {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                cursor: pointer;
+            }
             @media (max-width: 520px) {
                 #target-bot-ui {
                     right: 8px;
@@ -1074,7 +1605,7 @@
                 <div class="tb-header">
                     <div class="tb-title">Target Auto Buyer</div>
                     <div class="tb-header-actions">
-                        <div class="tb-pill">v3.1 ⚡</div>
+                        <div class="tb-pill">v3.2 ⚡</div>
                         <button id="bot-size-toggle" class="tb-size-toggle" type="button" aria-label="Switch panel size">${isLarge ? 'Compact' : 'Large'}</button>
                         <button id="bot-minimize-toggle" class="tb-icon-btn" type="button" aria-controls="bot-panel-body" aria-expanded="${!isMinimized}" aria-label="${isMinimized ? 'Restore panel' : 'Minimize panel'}">${isMinimized ? '□' : '−'}</button>
                     </div>
@@ -1113,7 +1644,7 @@
                         <div id="bot-drop-mode" class="tb-switch ${GM_getValue('dropMode', false) ? 'active' : ''}"></div>
                     </div>
 
-                    <div class="tb-section-label">Drop Timer (Phase 4)</div>
+                    <div class="tb-section-label">Drop Timer</div>
                     <div class="tb-grid-2">
                         <div class="tb-field">
                             <label class="tb-label" for="bot-drop-time">Drop Time</label>
@@ -1122,6 +1653,58 @@
                         <div class="tb-field">
                             <label class="tb-label">Countdown</label>
                             <div id="bot-drop-countdown" class="tb-input" style="display:flex;align-items:center;color:#6b7280;cursor:default;">—</div>
+                        </div>
+                    </div>
+
+                    <!-- Notifications & Sound Section -->
+                    <div class="tb-accordion-header" id="bot-notif-accordion-header">
+                        <span>🔔 Alerts & Notifications</span>
+                        <span id="bot-notif-chevron" style="transition: transform 200ms ease; font-size: 10px;">${GM_getValue('uiNotifOpen', false) ? '▲' : '▼'}</span>
+                    </div>
+                    <div id="bot-notif-accordion-body" class="tb-accordion-body ${GM_getValue('uiNotifOpen', false) ? 'open' : ''}">
+                        <!-- Sound settings -->
+                        <div class="tb-toggle-row" style="margin-bottom: 6px;">
+                            <span class="tb-toggle-label">🔊 Audio Alerts</span>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <button type="button" id="bot-test-sound" class="tb-test-btn" title="Test audio playback">Test</button>
+                                <div id="bot-sound-mode" class="tb-switch ${GM_getValue('soundEnabled', true) ? 'active' : ''}"></div>
+                            </div>
+                        </div>
+
+                        <!-- Discord settings -->
+                        <div class="tb-toggle-row" style="margin-bottom: 6px;">
+                            <span class="tb-toggle-label">💬 Discord Webhook</span>
+                            <div id="bot-discord-mode" class="tb-switch ${GM_getValue('discordEnabled', false) ? 'active' : ''}"></div>
+                        </div>
+                        <div id="bot-discord-fields" style="${GM_getValue('discordEnabled', false) ? '' : 'display:none;'} margin-bottom: 8px;">
+                            <div class="tb-field" style="margin-bottom: 4px;">
+                                <input class="tb-input" type="text" id="bot-discord-webhook" placeholder="https://discord.com/api/webhooks/..." value="${GM_getValue('discordWebhook', '')}" />
+                            </div>
+                            <button type="button" id="bot-test-discord" class="tb-test-btn" style="width: 100%;">Test Discord Webhook</button>
+                        </div>
+
+                        <!-- Telegram settings -->
+                        <div class="tb-toggle-row" style="margin-bottom: 6px;">
+                            <span class="tb-toggle-label">✈️ Telegram Bot</span>
+                            <div id="bot-telegram-mode" class="tb-switch ${GM_getValue('telegramEnabled', false) ? 'active' : ''}"></div>
+                        </div>
+                        <div id="bot-telegram-fields" style="${GM_getValue('telegramEnabled', false) ? '' : 'display:none;'} margin-bottom: 8px;">
+                            <div class="tb-field" style="margin-bottom: 4px;">
+                                <input class="tb-input" type="text" id="bot-telegram-token" placeholder="Bot Token (e.g. 123456:ABC...)" value="${GM_getValue('telegramToken', '')}" />
+                            </div>
+                            <div class="tb-field" style="margin-bottom: 4px;">
+                                <input class="tb-input" type="text" id="bot-telegram-chat-id" placeholder="Chat ID (e.g. 123456789)" value="${GM_getValue('telegramChatId', '')}" />
+                            </div>
+                            <button type="button" id="bot-test-telegram" class="tb-test-btn" style="width: 100%;">Test Telegram Message</button>
+                        </div>
+
+                        <!-- Event preferences -->
+                        <div class="tb-section-label" style="margin-top: 8px;">Notify On Events</div>
+                        <div class="tb-checkbox-group">
+                            <label class="tb-checkbox-item"><input type="checkbox" id="bot-notify-stock" ${GM_getValue('notifyStock', true) ? 'checked' : ''}/> In-Stock</label>
+                            <label class="tb-checkbox-item"><input type="checkbox" id="bot-notify-cart" ${GM_getValue('notifyCart', true) ? 'checked' : ''}/> Cart Added</label>
+                            <label class="tb-checkbox-item"><input type="checkbox" id="bot-notify-order" ${GM_getValue('notifyOrder', true) ? 'checked' : ''}/> Order Placed</label>
+                            <label class="tb-checkbox-item"><input type="checkbox" id="bot-notify-error" ${GM_getValue('notifyError', true) ? 'checked' : ''}/> Errors/Alerts</label>
                         </div>
                     </div>
 
@@ -1221,18 +1804,147 @@
 
         // --- Wire up input persistence ---
         const save = () => {
-            GM_setValue('qty',      $('#bot-qty').value);
-            GM_setValue('maxPrice', $('#bot-max-price').value);
-            GM_setValue('cvv',      $('#bot-cvv').value);
-            GM_setValue('minDelay', $('#bot-min-delay').value);
-            GM_setValue('maxDelay', $('#bot-max-delay').value);
-            GM_setValue('dropTime', $('#bot-drop-time').value);
+            GM_setValue('qty',              $('#bot-qty')?.value || '1');
+            GM_setValue('maxPrice',         $('#bot-max-price')?.value || '0');
+            GM_setValue('cvv',              $('#bot-cvv')?.value || '');
+            GM_setValue('minDelay',         $('#bot-min-delay')?.value || String(CFG.POLL_MIN_MS));
+            GM_setValue('maxDelay',         $('#bot-max-delay')?.value || String(CFG.POLL_MAX_MS));
+            GM_setValue('dropTime',         $('#bot-drop-time')?.value || '');
+            GM_setValue('discordWebhook',   $('#bot-discord-webhook')?.value?.trim() || '');
+            GM_setValue('telegramToken',    $('#bot-telegram-token')?.value?.trim() || '');
+            GM_setValue('telegramChatId',   $('#bot-telegram-chat-id')?.value?.trim() || '');
+            GM_setValue('notifyStock',      $('#bot-notify-stock')?.checked ?? true);
+            GM_setValue('notifyCart',       $('#bot-notify-cart')?.checked ?? true);
+            GM_setValue('notifyOrder',      $('#bot-notify-order')?.checked ?? true);
+            GM_setValue('notifyError',      $('#bot-notify-error')?.checked ?? true);
         };
 
-        ['bot-qty','bot-max-price','bot-cvv','bot-min-delay','bot-max-delay','bot-drop-time'].forEach(id => {
+        [
+            'bot-qty', 'bot-max-price', 'bot-cvv', 'bot-min-delay', 'bot-max-delay', 'bot-drop-time',
+            'bot-discord-webhook', 'bot-telegram-token', 'bot-telegram-chat-id',
+            'bot-notify-stock', 'bot-notify-cart', 'bot-notify-order', 'bot-notify-error'
+        ].forEach(id => {
             const el = $(`#${id}`);
             if (el) el.addEventListener('change', save);
         });
+
+        // Notifications accordion toggle
+        const notifAccordionHeader = $('#bot-notif-accordion-header');
+        const notifAccordionBody   = $('#bot-notif-accordion-body');
+        const notifChevron         = $('#bot-notif-chevron');
+        if (notifAccordionHeader && notifAccordionBody) {
+            notifAccordionHeader.addEventListener('click', () => {
+                const isOpen = notifAccordionBody.classList.toggle('open');
+                GM_setValue('uiNotifOpen', isOpen);
+                if (notifChevron) notifChevron.textContent = isOpen ? '▲' : '▼';
+            });
+        }
+
+        // Sound mode toggle
+        const soundToggle = $('#bot-sound-mode');
+        if (soundToggle) {
+            soundToggle.addEventListener('click', () => {
+                const active = !soundToggle.classList.contains('active');
+                soundToggle.classList.toggle('active', active);
+                GM_setValue('soundEnabled', active);
+                console.log(`Target Bot: Audio Alerts ${active ? 'ON 🔊' : 'OFF'}`);
+            });
+        }
+
+        // Test Sound button
+        const testSoundBtn = $('#bot-test-sound');
+        if (testSoundBtn) {
+            testSoundBtn.addEventListener('click', () => {
+                Sound.getContext();
+                console.log('Target Bot: 🔊 Playing test audio chime...');
+                Sound.orderConfirmedAlert();
+            });
+        }
+
+        // Discord toggle
+        const discordToggle = $('#bot-discord-mode');
+        const discordFields = $('#bot-discord-fields');
+        if (discordToggle) {
+            discordToggle.addEventListener('click', () => {
+                const active = !discordToggle.classList.contains('active');
+                discordToggle.classList.toggle('active', active);
+                GM_setValue('discordEnabled', active);
+                if (discordFields) discordFields.style.display = active ? 'block' : 'none';
+                console.log(`Target Bot: Discord Notifications ${active ? 'ON 💬' : 'OFF'}`);
+            });
+        }
+
+        // Test Discord button
+        const testDiscordBtn = $('#bot-test-discord');
+        if (testDiscordBtn) {
+            testDiscordBtn.addEventListener('click', async () => {
+                save();
+                const webhook = GM_getValue('discordWebhook', '').trim();
+                if (!webhook) {
+                    console.log('Target Bot: ⚠️ Enter a Discord Webhook URL first.');
+                    return;
+                }
+                console.log('Target Bot: 📨 Sending test message to Discord...');
+                try {
+                    await sendDiscordNotification('test', {
+                        title: '🧪 DISCORD WEBHOOK TEST SUCCESSFUL',
+                        message: 'Your Discord webhook is linked correctly! You will receive formatted drop alerts with product links, pricing, quantity, and order statuses.',
+                        productName: 'Sample Product Test (PlayStation 5)',
+                        tcin: '88492049',
+                        price: '$499.99',
+                        qty: '1',
+                        metrics: 'Test Latency: 0.15s',
+                        customFields: [
+                            { name: '🟢 Webhook Status', value: 'Connected & Verified', inline: true }
+                        ]
+                    });
+                    console.log('Target Bot: ✅ Discord test notification sent successfully!');
+                } catch (e) {
+                    console.log(`Target Bot: ❌ Discord test failed: ${e.message}`);
+                }
+            });
+        }
+
+        // Telegram toggle
+        const telegramToggle = $('#bot-telegram-mode');
+        const telegramFields = $('#bot-telegram-fields');
+        if (telegramToggle) {
+            telegramToggle.addEventListener('click', () => {
+                const active = !telegramToggle.classList.contains('active');
+                telegramToggle.classList.toggle('active', active);
+                GM_setValue('telegramEnabled', active);
+                if (telegramFields) telegramFields.style.display = active ? 'block' : 'none';
+                console.log(`Target Bot: Telegram Notifications ${active ? 'ON ✈️' : 'OFF'}`);
+            });
+        }
+
+        // Test Telegram button
+        const testTelegramBtn = $('#bot-test-telegram');
+        if (testTelegramBtn) {
+            testTelegramBtn.addEventListener('click', async () => {
+                save();
+                const token = GM_getValue('telegramToken', '').trim();
+                const chatId = GM_getValue('telegramChatId', '').trim();
+                if (!token || !chatId) {
+                    console.log('Target Bot: ⚠️ Enter both Telegram Bot Token and Chat ID first.');
+                    return;
+                }
+                console.log('Target Bot: 📨 Sending test message to Telegram...');
+                try {
+                    await sendTelegramNotification('test', {
+                        message: 'Your Telegram bot is configured and communicating properly! You will receive live alerts for in-stock drops, cart progress, and order confirmation.',
+                        productName: 'Sample Product Test (PlayStation 5)',
+                        tcin: '88492049',
+                        price: '$499.99',
+                        qty: '1',
+                        metrics: 'Test Latency: 0.15s',
+                    });
+                    console.log('Target Bot: ✅ Telegram test message sent successfully!');
+                } catch (e) {
+                    console.log(`Target Bot: ❌ Telegram test failed: ${e.message}`);
+                }
+            });
+        }
 
         // Drop-mode toggle
         const dropToggle = $('#bot-drop-mode');
@@ -1245,6 +1957,7 @@
 
         // Start / Stop
         $('#bot-start').addEventListener('click', () => {
+            Sound.getContext(); // Unlock audio context on user gesture
             save();
             setTabRunning(true);
             updateStatusUI(true);

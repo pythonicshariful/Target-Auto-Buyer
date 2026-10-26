@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Target Auto Buyer ⚡ v3.2 — Documentation & User Guide</title>
+    <style>
+        :root {
+            --primary: #cc0000;
+            --primary-dark: #990000;
+            --primary-light: #ff3b30;
+            --text-main: #111827;
+            --text-muted: #4b5563;
+            --bg-page: #f9fafb;
+            --bg-card: #ffffff;
+            --border-color: #e5e7eb;
+            --discord-color: #5865f2;
+            --telegram-color: #24a1de;
+            --success: #16a34a;
+            --warning: #d97706;
+            --code-bg: #1f2937;
+            --code-text: #f3f4f6;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: var(--text-main);
+            background-color: var(--bg-page);
+            line-height: 1.6;
+            font-size: 14px;
+            padding-bottom: 50px;
+        }
+
+        .container {
+            max-width: 920px;
+            margin: 0 auto;
+            padding: 24px 20px;
+        }
+
+        /* Top Bar */
+        .top-action-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            background: #ffffff;
+            padding: 12px 20px;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+        }
+
+        .print-btn {
+            background: linear-gradient(135deg, #cc0000 0%, #ff3b30 100%);
+            color: #ffffff;
+            border: none;
+            padding: 9px 18px;
+            font-size: 13px;
+            font-weight: 700;
+            border-radius: 8px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 4px 12px rgba(204, 0, 0, 0.25);
+            transition: transform 120ms ease, filter 120ms ease;
+        }
+
+        .print-btn:hover {
+            filter: brightness(1.08);
+            transform: translateY(-1px);
+        }
+
+        /* Hero Header */
+        .hero {
+            background: linear-gradient(135deg, #b91c1c 0%, #cc0000 50%, #ef4444 100%);
+            color: #ffffff;
+            padding: 36px 32px;
+            border-radius: 16px;
+            margin-bottom: 28px;
+            box-shadow: 0 10px 25px rgba(204, 0, 0, 0.2);
+            position: relative;
+        }
+
+        .hero h1 {
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .hero p {
+            font-size: 15px;
+            opacity: 0.95;
+            max-width: 760px;
+            line-height: 1.5;
+        }
+
+        .badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 700;
+            background: rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(4px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: #ffffff;
+        }
+
+        /* Section Cards */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+            page-break-inside: avoid;
+        }
+
+        h2 {
+            font-size: 20px;
+            font-weight: 800;
+            color: #111827;
+            margin-bottom: 14px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #f3f4f6;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        h3 {
+            font-size: 16px;
+            font-weight: 700;
+            color: #1f2937;
+            margin: 18px 0 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        h4 {
+            font-size: 14px;
+            font-weight: 700;
+            color: #374151;
+            margin: 12px 0 6px;
+        }
+
+        p, li {
+            color: var(--text-muted);
+            font-size: 13.5px;
+            margin-bottom: 8px;
+        }
+
+        ul, ol {
+            padding-left: 20px;
+            margin-bottom: 12px;
+        }
+
+        li {
+            margin-bottom: 6px;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 14px 0;
+            font-size: 12.5px;
+            page-break-inside: avoid;
+        }
+
+        th, td {
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            text-align: left;
+        }
+
+        th {
+            background: #f8fafc;
+            color: #1e293b;
+            font-weight: 700;
+        }
+
+        tr:nth-child(even) td {
+            background: #fbfcfd;
+        }
+
+        /* Code Blocks */
+        pre {
+            background: var(--code-bg);
+            color: var(--code-text);
+            padding: 14px 16px;
+            border-radius: 10px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            overflow-x: auto;
+            margin: 12px 0;
+            border: 1px solid #374151;
+            page-break-inside: avoid;
+        }
+
+        code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            background: rgba(17, 24, 39, 0.06);
+            color: #991b1b;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        pre code {
+            background: transparent;
+            color: inherit;
+            padding: 0;
+            font-weight: 400;
+        }
+
+        /* Callout Boxes */
+        .alert-box {
+            padding: 14px 16px;
+            border-radius: 10px;
+            margin: 14px 0;
+            font-size: 13px;
+            border-left: 4px solid;
+            page-break-inside: avoid;
+        }
+
+        .alert-info {
+            background: #eff6ff;
+            border-color: #3b82f6;
+            color: #1e40af;
+        }
+
+        .alert-warning {
+            background: #fffbeb;
+            border-color: #f59e0b;
+            color: #92400e;
+        }
+
+        .alert-success {
+            background: #f0fdf4;
+            border-color: #22c55e;
+            color: #166534;
+        }
+
+        /* Platform Comparison Showcase */
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin: 16px 0;
+            page-break-inside: avoid;
+        }
+
+        .platform-preview {
+            border-radius: 12px;
+            padding: 16px;
+            border: 1px solid var(--border-color);
+        }
+
+        .discord-preview-box {
+            background: #313338;
+            color: #dbdee1;
+            border-left: 4px solid #22c55e;
+        }
+
+        .discord-title {
+            color: #ffffff;
+            font-weight: 700;
+            font-size: 14px;
+            margin-bottom: 6px;
+        }
+
+        .discord-fields {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin: 10px 0;
+            font-size: 11.5px;
+        }
+
+        .discord-field-name {
+            color: #b5bac1;
+            font-weight: 600;
+        }
+
+        .discord-field-val {
+            color: #ffffff;
+            font-weight: 700;
+        }
+
+        .telegram-preview-box {
+            background: #ffffff;
+            border: 1px solid #dcdfe4;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.06);
+            color: #000000;
+            font-size: 12.5px;
+        }
+
+        .telegram-header {
+            font-weight: 800;
+            color: #16a34a;
+            margin-bottom: 4px;
+        }
+
+        .telegram-divider {
+            color: #9ca3af;
+            font-size: 10px;
+            letter-spacing: -1px;
+            margin: 4px 0;
+        }
+
+        .steps-box {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 16px 18px;
+            margin: 12px 0;
+            page-break-inside: avoid;
+        }
+
+        .step-number {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            background: #cc0000;
+            color: #ffffff;
+            border-radius: 50%;
+            font-size: 11px;
+            font-weight: 800;
+            margin-right: 6px;
+        }
+
+        /* Printable A4 Styling */
+        @media print {
+            @page {
+                size: A4 portrait;
+                margin: 14mm 16mm 14mm 16mm;
+            }
+
+            body {
+                background: #ffffff !important;
+                color: #000000 !important;
+                font-size: 11.5pt;
+                line-height: 1.45;
+                padding: 0;
+            }
+
+            .container {
+                max-width: 100% !important;
+                padding: 0 !important;
+            }
+
+            .top-action-bar {
+                display: none !important;
+            }
+
+            .hero {
+                padding: 20px 24px !important;
+                margin-bottom: 16px !important;
+                box-shadow: none !important;
+                border: 2px solid #cc0000 !important;
+                background: #cc0000 !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+
+            .card {
+                box-shadow: none !important;
+                border: 1px solid #d1d5db !important;
+                padding: 16px !important;
+                margin-bottom: 16px !important;
+                page-break-inside: avoid !important;
+            }
+
+            pre, table, .comparison-grid, .alert-box, .steps-box {
+                page-break-inside: avoid !important;
+            }
+
+            h2 {
+                page-break-after: avoid;
+                margin-top: 10px;
+            }
+
+            h3 {
+                page-break-after: avoid;
+            }
+
+            a {
+                text-decoration: underline;
+                color: #111827;
+            }
+
+            .print-color-exact {
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+
+    <!-- Top Action Bar for User -->
+    <div class="top-action-bar">
+        <div>
+            <strong>📄 Target Auto Buyer Documentation</strong> — Version 3.2
+        </div>
+        <button class="print-btn" onclick="window.print()">
+            🖨️ Print / Save as A4 PDF (Ctrl + P)
+        </button>
+    </div>
+
+    <!-- Hero Header -->
+    <div class="hero">
+        <h1>🎯 Target Auto Buyer ⚡ v3.2</h1>
+        <p>High-performance userscript for monitoring Target product availability, automated add-to-cart acceleration, single-pass checkout execution, and multi-channel instant notifications.</p>
+        <div class="badges">
+            <span class="badge">Tampermonkey Compatible</span>
+            <span class="badge">Target.com Optimized</span>
+            <span class="badge">Version 3.2</span>
+            <span class="badge">Discord Embeds</span>
+            <span class="badge">Telegram Bot API</span>
+            <span class="badge">Web Audio Synthesizer</span>
+        </div>
+    </div>
+
+    <!-- What's New in v3.2 -->
+    <div class="card">
+        <h2>⚡ Version 3.2 — Multi-Channel Alerts Update</h2>
+        <p>Version 3.2 elevates stock detection and order confirmations by incorporating dedicated notification channels tailored to platform standards:</p>
+        <ul>
+            <li><strong>💬 Discord Webhooks:</strong> Visual rich embeds with color-coded status strips, responsive item details, direct links, and localized timestamps.</li>
+            <li><strong>✈️ Telegram Bot API:</strong> Instant push alerts delivered to private chats, groups, or announcement channels using formatted HTML message hierarchy.</li>
+            <li><strong>🔊 Native Web Audio Synthesizer:</strong> Zero-dependency acoustic chimes for Stock Detected, Cart Added, Order Confirmed fanfare, and checkout errors without network lag or CORS blocks.</li>
+            <li><strong>🧪 In-HUD Verification Testing:</strong> One-click test buttons in the dashboard to verify Discord webhook delivery, Telegram bot communication, and audio playback immediately.</li>
+            <li><strong>⚙️ Granular Event Filtering:</strong> Checkboxes allow users to select which events trigger notifications (In-Stock, Cart Added, Order Placed, and Errors).</li>
+        </ul>
+    </div>
+
+    <!-- Platform Notification Comparison -->
+    <div class="card">
+        <h2>🎨 Discord vs. Telegram Notification Systems</h2>
+        <p>Because Discord and Telegram operate on fundamentally different visual and messaging paradigms, Target Auto Buyer implements specialized formatters for each:</p>
+
+        <div class="comparison-grid">
+            <!-- Discord Mockup -->
+            <div class="platform-preview discord-preview-box">
+                <div style="font-size: 11px; color: #949ba4; margin-bottom: 6px; text-transform: uppercase; font-weight: 700;">💬 Discord Embed Card</div>
+                <div class="discord-title">🚨 TARGET IN-STOCK DETECTED</div>
+                <div style="font-size: 12px; margin-bottom: 8px;">Product is in-stock! Attempting immediate add-to-cart...</div>
+                <div class="discord-fields">
+                    <div>
+                        <div class="discord-field-name">📦 Product</div>
+                        <div class="discord-field-val" style="color: #00a8fc;">PlayStation 5 Pro</div>
+                    </div>
+                    <div>
+                        <div class="discord-field-name">💰 Price</div>
+                        <div class="discord-field-val">$699.99</div>
+                    </div>
+                    <div>
+                        <div class="discord-field-name">🔢 TCIN</div>
+                        <div class="discord-field-val">88492049</div>
+                    </div>
+                    <div>
+                        <div class="discord-field-name">🛒 Qty</div>
+                        <div class="discord-field-val">1</div>
+                    </div>
+                </div>
+                <div style="font-size: 10px; color: #949ba4; border-top: 1px solid #3f4147; padding-top: 6px; margin-top: 6px;">
+                    Target Auto Buyer ⚡ v3.2 • Today at 2:30 PM
+                </div>
+            </div>
+
+            <!-- Telegram Mockup -->
+            <div class="platform-preview telegram-preview-box">
+                <div style="font-size: 11px; color: #64748b; margin-bottom: 6px; text-transform: uppercase; font-weight: 700;">✈️ Telegram HTML Message</div>
+                <div class="telegram-header">🚨 TARGET ITEM IN-STOCK!</div>
+                <div class="telegram-divider">━━━━━━━━━━━━━━━━━━━━</div>
+                <div>📦 <b>Product:</b> <i>PlayStation 5 Pro Console</i></div>
+                <div>🔢 <b>TCIN:</b> <code style="background:#f1f5f9;color:#0f172a;padding:1px 4px;">88492049</code></div>
+                <div>💰 <b>Price:</b> <code style="background:#f1f5f9;color:#0f172a;padding:1px 4px;">$699.99</code></div>
+                <div>🛒 <b>Quantity:</b> <code style="background:#f1f5f9;color:#0f172a;padding:1px 4px;">1</code></div>
+                <div style="margin-top: 6px;">🔗 <a href="#" style="color:#0284c7;font-weight:700;text-decoration:none;">👉 View on Target.com</a></div>
+                <div class="telegram-divider">━━━━━━━━━━━━━━━━━━━━</div>
+                <div style="font-size: 10px; color: #64748b;">⏰ 14:30:15 • Target Auto Buyer ⚡ v3.2</div>
+            </div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Feature</th>
+                    <th>💬 Discord Webhooks</th>
+                    <th>✈️ Telegram Bot API</th>
+                    <th>🔊 Web Audio Chimes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Presentation</strong></td>
+                    <td>Visual Rich Embed Cards with color strip</td>
+                    <td>Clean structured HTML text block</td>
+                    <td>Dynamic acoustic frequency synthesizer</td>
+                </tr>
+                <tr>
+                    <td><strong>Color Signatures</strong></td>
+                    <td>Event colors: Green, Blue, Amber, Emerald, Red</td>
+                    <td>Visual emoji headers and dividers</td>
+                    <td>High/Low pitch tone variations</td>
+                </tr>
+                <tr>
+                    <td><strong>Formatting Elements</strong></td>
+                    <td>Responsive 2-column inline field grid</td>
+                    <td>HTML tags: <code>&lt;b&gt;</code>, <code>&lt;code&gt;</code>, <code>&lt;a&gt;</code></td>
+                    <td>Multi-tone arpeggio sequences</td>
+                </tr>
+                <tr>
+                    <td><strong>Delivery Target</strong></td>
+                    <td>Discord Text Channel</td>
+                    <td>Direct Message, Group, or Channel</td>
+                    <td>Computer Speakers / Headphones</td>
+                </tr>
+                <tr>
+                    <td><strong>Setup Requisite</strong></td>
+                    <td>Server Webhook URL</td>
+                    <td>Bot Token + Chat ID</td>
+                    <td>Enabled by default (Zero setup)</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Connection Setup Guides -->
+    <div class="card">
+        <h2>🔌 How to Connect Discord & Telegram</h2>
+
+        <!-- Discord Guide -->
+        <h3>💬 Step-by-Step Discord Webhook Setup</h3>
+        <div class="steps-box">
+            <ol>
+                <li><span class="step-number">1</span><strong>Open Discord:</strong> Open your Discord desktop app or web browser and go to your private server.</li>
+                <li><span class="step-number">2</span><strong>Edit Channel:</strong> Hover over the text channel you want notifications in (e.g. <code>#drop-alerts</code>) and click the <strong>Edit Channel</strong> gear icon (⚙️). <em>(Or open Server Settings → Integrations → Webhooks)</em>.</li>
+                <li><span class="step-number">3</span><strong>Create Webhook:</strong> Click <strong>Integrations</strong> on the left, then click <strong>Webhooks</strong> → <strong>New Webhook</strong>.</li>
+                <li><span class="step-number">4</span><strong>Copy URL:</strong> Name the bot (e.g., <code>Target Auto Buyer</code>), select the channel, and click <strong>Copy Webhook URL</strong>.</li>
+                <li><span class="step-number">5</span><strong>Enable in Bot:</strong> On Target, open the bot HUD, expand <strong>🔔 Alerts & Notifications</strong>, toggle <strong>Discord Webhook</strong> to ON, paste the URL, and click <strong>Test Discord Webhook</strong>.</li>
+            </ol>
+        </div>
+
+        <!-- Telegram Guide -->
+        <h3>✈️ Step-by-Step Telegram Bot Setup</h3>
+        <div class="steps-box">
+            <ol>
+                <li><span class="step-number">1</span><strong>Open BotFather:</strong> In the Telegram search bar, search for <code>@BotFather</code> (ensure it has the official blue verification badge).</li>
+                <li><span class="step-number">2</span><strong>Create New Bot:</strong> Send <code>/newbot</code>. Choose a friendly name (e.g., <code>Target Alerts</code>) and a username ending in <code>bot</code> (e.g., <code>target_auto_drop_bot</code>).</li>
+                <li><span class="step-number">3</span><strong>Copy Bot Token:</strong> BotFather will give you an HTTP API Token (e.g., <code>7123456789:AAFlkJ389asdf89asdf23jkl_asdf</code>). Copy it.</li>
+                <li><span class="step-number">4</span><strong>Start Your Bot:</strong> Open the link to your bot (e.g., <code>t.me/target_auto_drop_bot</code>) and click <strong>Start</strong>. <em>(Required: bots cannot message you first!)</em>.</li>
+                <li><span class="step-number">5</span><strong>Find Chat ID:</strong>
+                    <ul>
+                        <li><strong>Personal DMs:</strong> Search for <code>@userinfobot</code> or <code>@RawDataBot</code> on Telegram, send any message, and copy your numerical <strong>Id</strong> (e.g., <code>123456789</code>).</li>
+                        <li><strong>Channels/Groups:</strong> Add the bot as an Administrator with "Post Messages" permission. Use your channel's public handle (e.g., <code>@my_channel</code>) or forward a message to <code>@RawDataBot</code> for the negative ID (e.g., <code>-100123456789</code>).</li>
+                    </ul>
+                </li>
+                <li><span class="step-number">6</span><strong>Enable in Bot:</strong> In the bot HUD, expand <strong>🔔 Alerts & Notifications</strong>, toggle <strong>Telegram Bot</strong> to ON, paste your <strong>Bot Token</strong> and <strong>Chat ID</strong>, and click <strong>Test Telegram Message</strong>.</li>
+            </ol>
+        </div>
+
+        <!-- Audio Guide -->
+        <h3>🔊 Audio Chimes Guide</h3>
+        <p>The bot includes built-in audio synthesizer alerts built using the Web Audio API:</p>
+        <ul>
+            <li><strong>Stock Detected:</strong> Ascending arpeggio (C5: 523Hz → E5: 659Hz → G5: 783Hz → C6: 1046Hz).</li>
+            <li><strong>Cart Confirmed:</strong> Positive confirmation double chime (G5: 783Hz → C6: 1046Hz).</li>
+            <li><strong>Order Confirmed:</strong> Celebratory victory fanfare arpeggio!</li>
+            <li><strong>Error / Warning:</strong> Sawtooth dual alert tones.</li>
+        </ul>
+        <div class="alert-box alert-info">
+            <strong>Browser Audio Tip:</strong> Modern browsers require at least one user gesture on the webpage before audio output is permitted. Starting the bot or clicking the <strong>Test</strong> button automatically unlocks the audio context.
+        </div>
+    </div>
+
+    <!-- Configuration Table -->
+    <div class="card">
+        <h2>⚙️ Dashboard Configuration Options</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th style="width: 25%;">Setting</th>
+                    <th style="width: 45%;">Description</th>
+                    <th style="width: 30%;">Recommended Setting</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>CVV</strong></td>
+                    <td>Card security verification code for saved Target wallet card.</td>
+                    <td>Your card's CVV</td>
+                </tr>
+                <tr>
+                    <td><strong>Max Price ($)</strong></td>
+                    <td>Holds add-to-cart if listed product price exceeds this value ($0 = disable check).</td>
+                    <td>Target retail MSRP</td>
+                </tr>
+                <tr>
+                    <td><strong>Quantity</strong></td>
+                    <td>Desired item purchase quantity (1–10).</td>
+                    <td><code>1</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Poll Min / Max (ms)</strong></td>
+                    <td>Randomized polling interval bounds during normal monitoring mode.</td>
+                    <td><code>500</code> / <code>1500</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Drop Mode (⚡)</strong></td>
+                    <td>Forces aggressive 250ms RedSky API polling.</td>
+                    <td>Enable near drop time</td>
+                </tr>
+                <tr>
+                    <td><strong>Drop Time</strong></td>
+                    <td>Scheduled release datetime; activates aggressive drop mode 30s prior.</td>
+                    <td>Drop release time</td>
+                </tr>
+                <tr>
+                    <td><strong>Audio Alerts</strong></td>
+                    <td>Web Audio synthesizer sound chimes for events.</td>
+                    <td>Enabled</td>
+                </tr>
+                <tr>
+                    <td><strong>Discord Webhook</strong></td>
+                    <td>Discord Webhook URL for channel embed delivery.</td>
+                    <td>Optional (User Webhook URL)</td>
+                </tr>
+                <tr>
+                    <td><strong>Telegram Bot</strong></td>
+                    <td>Telegram Bot Token + Chat ID for mobile alerts.</td>
+                    <td>Optional (Bot Token + Chat ID)</td>
+                </tr>
+                <tr>
+                    <td><strong>Event Checkboxes</strong></td>
+                    <td>Selectively filters which events dispatch notifications.</td>
+                    <td>All Checked (Stock, Cart, Order, Error)</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Core Features & Workflow -->
+    <div class="card">
+        <h2>🚀 Core Features & Purchase Architecture</h2>
+        <ul>
+            <li><strong>Dual-Mode Monitoring:</strong> Combines RedSky REST fulfillment API polling with live DOM MutationObservers to detect when Target clears out-of-stock flags.</li>
+            <li><strong>Intelligent Cart Drawer Handling:</strong> Detects Target's slide-out drawer confirmation (<code>Added to cart</code>, <code>View cart & check out</code>) and auto-declines warranty/protection plan modals.</li>
+            <li><strong>Rapid Single-Pass Checkout:</strong> Continuously evaluates checkout pages at 200ms intervals, fills CVV, and clicks Place Order once.</li>
+            <li><strong>Duplicate Prevention:</strong> Prevents multiple clicks on the Place Order button and tracks order confirmation elements.</li>
+            <li><strong>Floating Resizable HUD:</strong> Compact/Large panel sizes, minimizable to top bar, draggable header with remembered screen coordinates.</li>
+        </ul>
+    </div>
+
+    <!-- Important Notice & Disclaimer -->
+    <div class="card" style="border-left: 4px solid #cc0000;">
+        <h2>⚠️ Important Considerations & Disclaimer</h2>
+        <p><strong>Experimental Tool:</strong> Target Auto Buyer is an independent open-source script and is not affiliated with Target Corporation. Use responsibly and in accordance with Target's Terms of Service.</p>
+        <p><strong>Verification Requirements:</strong> The bot cannot bypass mandatory CAPTCHA challenges, two-factor authentication (2FA), or SMS verification. Always ensure you are signed into Target before a high-demand drop.</p>
+        <p><strong>Financial Responsibility:</strong> Always verify order items, quantities, shipping address, and total charges. Do not rely exclusively on automated tools for unattended financial transactions.</p>
+    </div>
+
+</div>
+
+</body>
+</html>

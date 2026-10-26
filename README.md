@@ -1,43 +1,59 @@
-# Target Auto Buyer ⚡ v3.1
+# Target Auto Buyer ⚡ v3.2
 
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-Supported-green.svg)](https://www.tampermonkey.net/)
 [![Platform](https://img.shields.io/badge/Platform-Target.com-CC0000.svg)](https://www.target.com)
-[![Version](https://img.shields.io/badge/Version-3.1-blue.svg)](#features)
+[![Version](https://img.shields.io/badge/Version-3.2-blue.svg)](#features)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](#license)
 
-An experimental browser userscript for monitoring Target product availability and assisting with cart and checkout steps. It is not an official Target product and cannot guarantee stock, successful checkout, or an order.
+An experimental browser userscript for monitoring Target product availability and assisting with cart and checkout steps with instant Discord, Telegram, and audio chime alerts. It is not an official Target product and cannot guarantee stock, successful checkout, or an order.
 
 ---
 
-## ⚡ Version 3.1
+## ⚡ Version 3.2 — What's New
 
-Version 3.1 adds a movable, resizable, minimizable dashboard; stock-check log messages; and safer Place Order handling. Target may change its page or API at any time, so selectors and behavior can stop working without notice.
+Version 3.2 introduces multi-channel alerts and audio notifications:
+- **💬 Discord Webhook Integration:** Rich embed alerts with product title, TCIN, price, quantity, status, and direct Target product links.
+- **✈️ Telegram Bot Integration:** Instant messages via Telegram Bot API with formatted product and order details.
+- **🔊 Built-In Web Audio Synthesizer:** Instant audio chimes for Stock Detected, Cart Added, Order Confirmed fanfare, and Warnings — zero external audio downloads or CORS issues.
+- **🧪 One-Click Test Buttons:** Test your Discord webhook, Telegram connection, and Audio chimes directly from the bot control panel.
+- **⚙️ Selective Event Triggers:** Toggle alerts for Stock Detection, Cart Confirmation, Order Submission/Confirmation, and Checkout Errors individually.
 
 ---
 
 ## 🚀 Key Features
 
-### ⏱️ 1. Ultra-Low Latency & High-Speed Polling
+### 🔔 1. Multi-Channel Alerts & Audio Chimes (New in v3.2)
+- **Discord Webhooks:** Sends rich colored embeds on in-stock detection, add-to-cart confirmation, and order completion.
+- **Telegram Bot API:** Instant push alerts to your Telegram chat or channel.
+- **Web Audio API Chimes:**
+  - 🚨 *In-Stock Alert:* Energetic ascending arpeggio.
+  - 🛒 *Cart Added:* Upbeat double confirmation chime.
+  - 🎉 *Order Confirmed:* Full celebratory victory fanfare!
+  - ⚠️ *Errors / Alerts:* Warning alert tones.
+- **In-Panel Testing:** "Test" buttons let you verify webhook deliveries and sound playback immediately before drop time.
+
+### ⏱️ 2. Ultra-Low Latency & High-Speed Polling
 - **⚡ Drop Mode:** Uses a 250ms API polling interval while enabled.
 - **Normal Polling Mode:** Uses a randomized interval between the configured minimum and maximum.
 - **Drop Timer:** Displays a countdown and uses 250ms polling during the configured 30 seconds before the drop time.
 - **Polling limits:** Rapid repeated requests may be rate-limited or blocked. Use monitoring only when needed.
 
-### 🛒 2. Intelligent Add-to-Cart Flow
+### 🛒 3. Intelligent Add-to-Cart Flow
 - **Direct Cart Drawer Detection:** Targets the live Target slide-out drawer (`Added to cart`, `View cart & check out`, `custom-quantity-picker`).
 - **Auto-Decline Protection Plans:** Automatically dismisses warranty/protection plan modals without stalling the flow.
 - **Cart Page Auto-Advance:** Looks for a supported checkout button on the cart page.
 - **ATC Retries:** Retries when cart confirmation is not detected; after the retry limit it may continue to checkout without confirmed cart status. Verify the cart contents yourself.
 
-### 💳 3. Rapid Single-Pass Checkout
+### 💳 4. Rapid Single-Pass Checkout
 - **200ms Fast Execution Loop:** Continuously evaluates checkout state.
 - **CVV Auto-Fill:** Fills the CVV field when configured. Login, mandatory verification, CAPTCHA, and other prompts may require manual action.
 - **Single Place Order Submission:** Clicks Place Order once per loaded checkout page, then waits for an explicit confirmation signal. A page reload starts a new script page session, so the bot cannot guarantee duplicate prevention across reloads.
 - **Best-Effort Order Status:** Looks for specific confirmation elements/headings while the checkout handler is running. If checkout ends without detecting one, it asks you to verify the order manually. Confirmation detection may fail if Target changes its page or navigation.
 - **Cart Error Detection:** Detects some item-removed and sold-out messages. It does not guarantee recovery or a successful retry.
 
-### 📊 4. Diagnostics & Live HUD
+### 📊 5. Diagnostics & Live HUD
 - **Real-Time Floating Control Panel:** Drag the header to move the dashboard; use Large/Compact and minimize/restore controls. Its position and size preferences are saved.
+- **Collapsible Alerts Section:** Expand/collapse the notifications drawer to configure webhooks, tokens, and sound toggles.
 - **Live Stock Log:** Displays each API stock-check attempt and its result; keeps the most recent 300 log lines.
 - **Live Performance Metrics:** Tracks timestamps and calculates latency for each stage:
   - `Stock → ATC`
@@ -83,12 +99,138 @@ Navigate to any Target product page (e.g. `https://www.target.com/p/...`). A flo
 | **Quantity** | Number of items to select (1–10). | `1` |
 | **Drop Mode (⚡)** | Toggles 250ms API polling. | Enable only when needed |
 | **Drop Time** | Date & time when the item goes live. | Set to scheduled release time |
+| **Audio Alerts (🔊)** | Synthesizes pleasant attention chimes for stock, cart, order, and errors. | Enabled |
+| **Discord Webhook (💬)** | Webhook URL for posting embeds to your private Discord channel. | Optional |
+| **Telegram Bot (✈️)** | Telegram Bot Token and Chat ID for instant Telegram notifications. | Optional |
+| **Event Preferences** | Selectively toggle Stock, Cart, Order, and Error notifications. | All Checked |
 
-Settings are saved as they are changed via the userscript manager. The dashboard currently provides a CVV field; it does not provide a password field.
+Settings are saved as they are changed via the userscript manager.
 
-Use the **Large / Compact** button in the dashboard header to resize the panel, or the **−** button to minimize it; these preferences are remembered. Drag the header to move the dashboard, and its position is saved. While monitoring, each stock-check attempt and its result appears in the dashboard log.
+### 3. Setting Up Alerts & Notifications (Discord, Telegram & Sound)
 
-### 3. Launching the Bot
+Click **🔔 Alerts & Notifications** on the bot dashboard to expand the alerts configuration drawer. Target Auto Buyer v3.2 supports both Discord and Telegram, treating them as distinct notification systems formatted specifically for each platform's design guidelines.
+
+---
+
+#### 💬 How to Connect Discord Webhooks
+
+Discord webhooks allow Target Auto Buyer to push rich, colored visual **Embeds** directly into any text channel in your private Discord server.
+
+```mermaid
+flowchart LR
+    A[Target Auto Buyer] -->|POST Webhook JSON| B[Discord API]
+    B --> C[#target-drops Channel]
+    C --> D[Desktop & Mobile Notification]
+```
+
+##### Step 1: Create a Discord Webhook
+1. Open Discord on desktop or in your browser.
+2. Navigate to your server (or create a new free private server for drop alerts).
+3. Right-click the channel you want alerts in (e.g. `#target-drops`) and select **Edit Channel** (⚙️).
+   *(Alternatively, go to **Server Settings** → **Integrations** → **Webhooks**).*
+4. Click **Integrations** in the left sidebar, then click **Webhooks** → **New Webhook**.
+5. Give your webhook a friendly name (e.g., `Target Auto Buyer`) and select your desired channel.
+6. Click **Copy Webhook URL**. The URL looks like:
+   `https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyz...`
+
+##### Step 2: Configure in Target Auto Buyer HUD
+1. On any Target page, expand the **🔔 Alerts & Notifications** section.
+2. Click the toggle switch next to **💬 Discord Webhook** to turn it **ON** (green).
+3. Paste your copied Webhook URL into the input field.
+4. Click **Test Discord Webhook**. You will instantly receive a test embed in Discord!
+
+##### 🎨 Discord Notification Template Architecture
+Discord alerts utilize Discord's native Embed API:
+- **Color Coding:** Green (`#22C55E`) for in-stock, Blue (`#3B82F6`) for cart, Amber (`#F59E0B`) for checkout submission, Emerald (`#10B981`) for order confirmation, and Red (`#EF4444`) for errors.
+- **Inline Multi-Column Grid:** Displays TCIN, Price, Quantity, and Timing Latency side-by-side in responsive field columns.
+- **Product Title Link:** Clickable hyperlink leading directly to the Target product page.
+- **Thumbnail:** Target branding thumbnail attached to the card.
+- **Localized Timestamp:** Discord displays the exact time converted to your device's local timezone.
+
+---
+
+#### ✈️ How to Connect Telegram Bot API
+
+Telegram uses the official Bot API to send instantaneous push notifications to your personal direct messages, private group, or announcement channel.
+
+```mermaid
+flowchart LR
+    A[Target Auto Buyer] -->|sendMessage HTML| B[Telegram Bot API]
+    B --> C[Your Private Chat / Channel]
+    C --> D[Instant Mobile Push Notification]
+```
+
+##### Step 1: Create Your Bot with BotFather
+1. Open the Telegram app and search for `@BotFather` (ensure it has the official blue verification checkmark).
+2. Start the chat and send:
+   ```text
+   /newbot
+   ```
+3. Enter a friendly name for your bot (e.g. `Target Drop Alerts`).
+4. Enter a username for your bot that ends with `bot` (e.g. `target_buyer_alert_bot`).
+5. BotFather will provide an **HTTP API Token**. Copy it. It looks like:
+   `7123456789:AAFlkJ389asdf89asdf23jkl_asdf`
+
+##### Step 2: Start a Conversation with Your Bot
+- Click the link provided by BotFather (e.g. `t.me/target_buyer_alert_bot`) and click **Start** (or send `/start`).
+- *Note:* Telegram bots cannot message you first; you must click Start once so the bot has permission to send you messages.
+
+##### Step 3: Find Your Telegram Chat ID
+You can receive alerts in your personal private chat, in a private group, or in a channel:
+
+- **Option A — Personal Chat (Most Common):**
+  1. Search for `@userinfobot` or `@RawDataBot` in Telegram.
+  2. Send it any message.
+  3. It will reply with your numerical **Id** (e.g., `123456789`).
+
+- **Option B — Private Group or Channel:**
+  1. Add your bot as an **Administrator** in your group or channel (grant "Post Messages" permission).
+  2. For a public channel, your Chat ID is `@yourchannelusername` (e.g., `@target_drops_feed`).
+  3. For a private channel or group, forward a message from the channel to `@RawDataBot` to find the negative channel ID (e.g., `-100192837465`).
+
+##### Step 4: Configure in Target Auto Buyer HUD
+1. In the bot dashboard, expand **🔔 Alerts & Notifications**.
+2. Click the toggle switch next to **✈️ Telegram Bot** to turn it **ON** (green).
+3. Paste your **Bot Token** into the Token field.
+4. Paste your **Chat ID** into the Chat ID field.
+5. Click **Test Telegram Message**. Your bot will immediately deliver a formatted test alert!
+
+##### 📱 Telegram Notification Template Architecture
+Telegram does not use embeds; instead, it uses clean, structured **HTML messages** optimized for mobile reading:
+- **Header Emoji & Bold Status:** `🚨 TARGET ITEM IN-STOCK!` or `🎉 ORDER CONFIRMED!`
+- **Clean Visual Dividers:** Clean divider bars (`━━━━━━━━━━━━━━━━━━━━`) separating sections.
+- **Monospaced Code Badges:** Price `<code>$499.99</code>`, TCIN `<code>88492049</code>`, and latency metrics formatted in copyable monospaced tags.
+- **Call-to-Action Link:** `👉 View on Target.com` formatted as a prominent hyperlink.
+- **Rich Card Preview:** Target product card preview automatically generated by Telegram.
+
+---
+
+#### 🔊 Built-in Web Audio Chimes
+- **Instant Zero-Latency Feedback:** Generated using the browser's native Web Audio API (`AudioContext`). No audio files to download, no 404 errors, no CORS restrictions.
+- **Tone Profiles:**
+  - 🚨 **Stock Detected:** High-energy ascending arpeggio (C5 → E5 → G5 → C6).
+  - 🛒 **Cart Confirmed:** Positive double confirmation chime (G5 → C6).
+  - 🎉 **Order Confirmed:** Celebratory victory fanfare arpeggio!
+  - ⚠️ **Checkout Warning / Sold Out:** Low-pitch double alert tone.
+- **Testing:** Click the **Test** button next to Audio Alerts to sample the chime and ensure your browser's audio output is active.
+
+---
+
+### 4. Platform Notification Comparison
+
+| Feature | 💬 Discord Webhooks | ✈️ Telegram Bot API | 🔊 Web Audio Chimes |
+|---|---|---|---|
+| **Notification Type** | Visual Rich Embed Cards | Formatted HTML Text Block | Synthesized Audio Frequencies |
+| **Delivery Medium** | Discord Channel / Server | Direct Message, Group, or Channel | Local Browser Audio Speakers/Headphones |
+| **Color Coding** | Colored side-strip per event status | Visual Emoji Status Headers | Tone Frequency Modulation |
+| **Data Formatting** | Responsive multi-column grid fields | Code blocks (`<code>`) & bold highlights | Pitch & tempo changes |
+| **Product Links** | Hyperlinked embed title | Styled HTML anchor (`<a>`) | None |
+| **External Setup** | Server Webhook URL | BotFather Token + Chat ID | None (Ready out of the box) |
+| **Offline Push** | Discord Mobile/Desktop app | Telegram Mobile/Desktop app | Works while tab is open |
+
+---
+
+### 5. Launching the Bot
 1. Navigate to the product page you want to monitor.
 2. Click **Start Bot**. The status will turn green (`Running`).
 3. If the item is out of stock, the bot will begin dual-mode monitoring (RedSky API + button observer). The observer will not click while the product page still reports “Out of Stock,” even if an ATC-like control is present.
