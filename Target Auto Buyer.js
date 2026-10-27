@@ -1344,63 +1344,107 @@
             return;
         }
 
-        const keywordsStr = GM_getValue('pokemonKeywords', '30th, ascended, pitch black, booster, elite trainer, scarlet, celebration');
+        const buyAny = GM_getValue('buyAnyPokemon', true);
+        const keywordsStr = GM_getValue('pokemonKeywords', 'pokemon, pokimon, 30th, ascended, pitch black, booster, elite trainer, scarlet, celebration, tin, collection, pack, box, tcg');
         const keywords = keywordsStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
 
         const blacklistStr = GM_getValue('pokemonBlacklist', 'shirt, socks, hoodie, costume, plush, binder, book, blanket');
         const blacklist = blacklistStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
 
-        const productCards = $$('[data-test="product-card"], [data-test="@web/site-top-of-funnel/ProductCardWrapper"], div[data-test="product-grid"] > div');
-        console.log(`Target Bot: Found ${productCards.length} product cards on page.`);
+        // Find all product cards or product links on search page
+        let productCards = $$(
+            '[data-test="product-card"], ' +
+            '[data-test="@web/site-top-of-funnel/ProductCardWrapper"], ' +
+            '[data-test="@web/ProductCard/body"], ' +
+            'div[data-test="product-grid"] > div, ' +
+            'div[data-test="product-grid"] li, ' +
+            'div[data-component="ProductCard"], ' +
+            'div[class*="styles__ProductCardWrapper"], ' +
+            'div[class*="ProductCard"]'
+        );
+
+        if (productCards.length === 0) {
+            const links = $$('a[href*="/p/"]');
+            const seenHref = new Set();
+            productCards = links.filter(a => {
+                const href = a.href.split('?')[0];
+                if (seenHref.has(href)) return false;
+                seenHref.add(href);
+                return a.textContent && a.textContent.trim().length > 3;
+            }).map(a => a.closest('div') || a);
+        }
+
+        console.log(`Target Bot: Found ${productCards.length} product elements on search page.`);
 
         let matchFound = null;
 
         for (const card of productCards) {
-            const titleEl = $('[data-test="product-title"]', card) || $('a[href*="/p/"]', card);
-            const title = (titleEl?.textContent || '').toLowerCase();
-            const link = $('a[href*="/p/"]', card)?.href;
+            const titleEl = $('[data-test="product-title"]', card) || $('a[href*="/p/"]', card) || $('h2', card) || $('h3', card);
+            const title = (titleEl?.textContent || '').trim().toLowerCase();
+            const linkEl = $('a[href*="/p/"]', card) || card.closest('a[href*="/p/"]') || $('a', card);
+            const link = linkEl?.href;
 
-            if (!title || !link) continue;
+            if (!title || !link || !link.includes('/p/')) continue;
 
             // Check blacklist
             if (blacklist.some(b => title.includes(b))) continue;
 
-            // Check whitelist
-            const isMatch = keywords.length === 0 || keywords.some(k => title.includes(k));
+            // Check whitelist or buy-any mode
+            const isMatch = buyAny || keywords.length === 0 || keywords.some(k => title.includes(k));
             if (!isMatch) continue;
 
-            // Check if card has active ATC button
+            // Check if card has active ATC button right on search page
             const cardAtc = $('button[data-test="shippingButton"]:not([disabled])', card) ||
                             $('button[id*="addToCart"]:not([disabled])', card) ||
-                            xpath(".//button[not(@disabled) and contains(., 'Add to cart')]", card);
+                            xpath(".//button[not(@disabled) and (contains(., 'Add to cart') or contains(., 'Ship it'))]", card);
 
             if (cardAtc && isVisible(cardAtc) && !isDisabled(cardAtc)) {
-                console.log(`Target Bot: 🎯 In-stock Pokemon match found on search page: "${title}"`);
-                matchFound = { link, btn: cardAtc };
+                console.log(`Target Bot: 🎯 In-stock Pokemon card with direct ATC found: "${title}"`);
+                matchFound = { title, link, btn: cardAtc };
                 break;
             }
 
-            // Check if card shows in-stock status
-            const cardText = (card.textContent || '').toLowerCase();
-            if (!cardText.includes('out of stock') && !cardText.includes('sold out')) {
-                matchFound = { link, btn: null };
+            // Check online stock status (ignore store pickup out-of-stock messages)
+            const text = (card.textContent || '').toLowerCase();
+            const isOnlineOos =
+                text.includes('sold out online') ||
+                text.includes('out of stock online') ||
+                text.includes('temporarily out of stock') ||
+                text.includes('currently unavailable') ||
+                Boolean(card.querySelector('[data-test="outOfStockButton"]')) ||
+                Boolean(card.querySelector('[data-test="soldOutButton"]'));
+
+            if (!isOnlineOos) {
+                console.log(`Target Bot: 🎯 In-stock Pokemon item found: "${title}"`);
+                matchFound = { title, link, btn: null };
                 break;
             }
         }
 
         if (matchFound) {
-            console.log(`Target Bot: 🚀 Navigating to matched product: ${matchFound.link}`);
+            if (matchFound.btn) {
+                console.log(`Target Bot: 🛒 Clicking Add to Cart directly on search page for: ${matchFound.title}`);
+                matchFound.btn.click();
+                watchForCartConfirmation();
+                return;
+            }
+
+            console.log(`Target Bot: 🚀 Navigating to matched product page: ${matchFound.link}`);
+            updateStatusUI(true, '🚀 Opening Product...');
             window.location.href = matchFound.link;
             return;
         }
 
-        console.log('Target Bot: No available Pokemon products in current view. Re-scanning in 4 seconds...');
+        console.log(`Target Bot: Scanned ${productCards.length} products. No matching in-stock items found in current view. Scrolling / Re-checking in 8s...`);
+        updateStatusUI(true, '🔍 Scanning search results...');
+        window.scrollBy({ top: 500, behavior: 'smooth' });
+
         clearTimeout(state.searchPollTimeout);
         state.searchPollTimeout = setTimeout(() => {
             if (getTabRunning()) {
                 window.location.reload();
             }
-        }, 4000);
+        }, 8000);
     }
 
     // =====================================================================
@@ -2034,6 +2078,11 @@
                         </div>
 
                         <div class="tb-toggle-row">
+                            <span class="tb-toggle-label">⚡ Buy ANY In-Stock Pokemon Card</span>
+                            <div id="bot-buy-any-pokemon" class="tb-switch ${GM_getValue('buyAnyPokemon', true) ? 'active' : ''}"></div>
+                        </div>
+
+                        <div class="tb-toggle-row">
                             <span class="tb-toggle-label">🔄 Repeat Purchase Loop (Auto-Rebuy)</span>
                             <div id="bot-repeat-loop" class="tb-switch ${GM_getValue('repeatPurchaseLoop', true) ? 'active' : ''}"></div>
                         </div>
@@ -2264,6 +2313,7 @@
         setupToggle('bot-skip-price', 'skipPriceCheck');
         setupToggle('bot-drop-mode', 'dropMode');
         setupToggle('bot-pokemon-autoscan', 'pokemonAutoScan');
+        setupToggle('bot-buy-any-pokemon', 'buyAnyPokemon');
         setupToggle('bot-repeat-loop', 'repeatPurchaseLoop');
         setupToggle('bot-sound-mode', 'soundEnabled');
         setupToggle('bot-discord-mode', 'discordEnabled', active => {
