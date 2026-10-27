@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Target Auto Buyer
 // @namespace    http://tampermonkey.net/
-// @version      3.2
-// @description  Auto buy from target.com — optimized for high-demand drops with Discord, Telegram, and Audio alerts
+// @version      4.0
+// @description  Target Auto Buyer ⚡ v4.0 — Pokemon Drop & Auto-Monitor Edition with Multi-URL, Multi-Account, Cart Qty Fix & Discord/Telegram alerts
 // @author       Pythonic Shariful
 // @match        https://www.target.com/*
 // @grant        GM_setValue
@@ -12,6 +12,7 @@
 // @connect      discord.com
 // @connect      discordapp.com
 // @connect      api.telegram.org
+// @connect      redsky.target.com
 // ==/UserScript==
 
 (function() {
@@ -38,16 +39,18 @@
 
         // Checkout
         CHECKOUT_INTERVAL_MS:   200,     // Checkout loop speed (was 500ms)
-        // Startup
         STARTUP_POLL_MS:        100,     // How often to check if page is ready
         STARTUP_MAX_WAIT_MS:   5000,     // Max wait for page ready before proceeding anyway
 
         // Session pre-warming
         SESSION_CHECK_URL: 'https://www.target.com/co-cart',
+
+        // Multi-Tab & Broadcast
+        CHANNEL_NAME: 'target_auto_buyer_channel_v4',
     };
 
     // =====================================================================
-    //  PERFORMANCE METRICS — Track timing for diagnostics
+    //  PERFORMANCE METRICS & ORDER STATS
     // =====================================================================
     const metrics = {
         pollCount: 0,
@@ -87,6 +90,64 @@
     };
 
     // =====================================================================
+    //  CROSS-TAB BROADCAST CHANNEL (Multi-Account & Multi-Tab)
+    // =====================================================================
+    const tabId = 'tab_' + Math.random().toString(36).substring(2, 9);
+    let broadcastChannel = null;
+
+    try {
+        if (typeof BroadcastChannel !== 'undefined') {
+            broadcastChannel = new BroadcastChannel(CFG.CHANNEL_NAME);
+            broadcastChannel.onmessage = (event) => {
+                handleBroadcastMessage(event.data);
+            };
+        }
+    } catch (e) {
+        // Fallback or ignore if unsupported
+    }
+
+    function sendBroadcast(type, payload = {}) {
+        if (broadcastChannel) {
+            try {
+                broadcastChannel.postMessage({ type, tabId, ...payload });
+            } catch (e) {}
+        }
+    }
+
+    function handleBroadcastMessage(data) {
+        if (!data || data.tabId === tabId) return;
+
+        switch (data.type) {
+            case 'GLOBAL_START':
+                if (!getTabRunning()) {
+                    console.log(`Target Bot [Multi-Tab]: Received START from ${data.tabId}`);
+                    setTabRunning(true);
+                    updateStatusUI(true);
+                    runBot();
+                }
+                break;
+            case 'GLOBAL_STOP':
+                if (getTabRunning()) {
+                    console.log(`Target Bot [Multi-Tab]: Received STOP from ${data.tabId}`);
+                    setTabRunning(false);
+                    updateStatusUI(false);
+                    stopAllTimers();
+                }
+                break;
+            case 'ORDER_COMPLETED':
+                console.log(`Target Bot [Multi-Tab]: Tab ${data.tabId} completed an order! Total purchased: ${data.totalPurchased}`);
+                updateGoalUI();
+                break;
+            case 'CLAIM_TCIN':
+                // Another tab is already handling this TCIN
+                if (data.tcin && data.tcin === extractTcin() && getTabRunning()) {
+                    console.log(`Target Bot [Multi-Tab]: Notice: TCIN ${data.tcin} is also being processed by ${data.tabId}`);
+                }
+                break;
+        }
+    }
+
+    // =====================================================================
     //  CONSOLE LOG HOOK — High-precision timestamps for diagnostics
     // =====================================================================
     const originalConsoleLog = console.log;
@@ -116,15 +177,19 @@
         checkoutLoop:         null,
         pollTimeout:          null,
         cartTimeout:          null,
+        searchPollTimeout:    null,
         placeOrderError:      null,
-        domObserver:          null,      // Phase 4: dual-mode DOM observer
-        sessionValid:         null,      // Phase 4: pre-warm result
-        dropTimerInterval:    null,      // Phase 4: drop timer countdown
+        domObserver:          null,
+        sessionValid:         null,
+        dropTimerInterval:    null,
+        multiUrlIndex:        0,
+        lastAddedTcin:        null,
     };
 
     function stopAllTimers() {
         clearTimeout(state.pollTimeout);
         clearTimeout(state.cartTimeout);
+        clearTimeout(state.searchPollTimeout);
         if (state.cartObserver) { state.cartObserver.disconnect(); state.cartObserver = null; }
         if (state.checkoutLoop) { clearInterval(state.checkoutLoop); state.checkoutLoop = null; }
         if (state.domObserver)  { state.domObserver.disconnect(); state.domObserver = null; }
@@ -150,15 +215,33 @@
     }
 
     // =====================================================================
-    //  DOM HELPERS
+    //  PURCHASE GOAL TRACKING (Persists across orders & tabs)
     // =====================================================================
-    function $(sel)      { return document.querySelector(sel); }
-    function $$(sel)     { return document.querySelectorAll(sel); }
-    function xpath(path) {
-        return document.evaluate(path, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+    function getPurchasedCount() {
+        return parseInt(GM_getValue('purchasedCount', '0'), 10) || 0;
     }
 
-    function isVisible(el)  {
+    function incrementPurchasedCount(qty = 1) {
+        const count = getPurchasedCount() + qty;
+        GM_setValue('purchasedCount', String(count));
+        sendBroadcast('ORDER_COMPLETED', { totalPurchased: count, qtyAdded: qty });
+        return count;
+    }
+
+    function getTargetGoal() {
+        return parseInt(GM_getValue('targetGoal', '1000'), 10) || 1000;
+    }
+
+    // =====================================================================
+    //  DOM HELPERS
+    // =====================================================================
+    function $(sel, root = document)  { return root.querySelector(sel); }
+    function $$(sel, root = document) { return Array.from(root.querySelectorAll(sel)); }
+    function xpath(path, root = document) {
+        return document.evaluate(path, root, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+    }
+
+    function isVisible(el) {
         if (!el) return false;
         const r = el.getBoundingClientRect();
         return r.width > 0 && r.height > 0;
@@ -174,17 +257,23 @@
 
     /** Set a React-controlled input's value without React swallowing the change */
     function setNativeValue(el, value) {
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        setter.call(el, value);
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter) {
+            setter.call(el, value);
+        } else {
+            el.value = value;
+        }
         el.dispatchEvent(new Event('input',  { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
     // =====================================================================
     //  TCIN EXTRACTION
     // =====================================================================
-    function extractTcin() {
-        const m = window.location.href.match(/A-(\d+)/);
+    function extractTcin(url = window.location.href) {
+        const m = url.match(/A-(\d+)/);
         return m ? m[1] : null;
     }
 
@@ -374,6 +463,9 @@
         if (details.qty) {
             embedFields.push({ name: '🛒 Qty', value: `\`${details.qty}\``, inline: true });
         }
+        if (details.goal) {
+            embedFields.push({ name: '🎯 Goal Progress', value: `\`${details.goal}\``, inline: true });
+        }
         if (details.metrics) {
             embedFields.push({ name: '⚡ Latency / Timing', value: `\`${details.metrics}\``, inline: false });
         }
@@ -391,14 +483,14 @@
                 url: 'https://assets.targetimg1.com/web/static-resources/favicons/favicon.ico'
             },
             footer: {
-                text: 'Target Auto Buyer ⚡ v3.2 • High-Demand Drop Assist',
+                text: 'Target Auto Buyer ⚡ v4.0 Pokemon Edition',
                 icon_url: 'https://assets.targetimg1.com/web/static-resources/favicons/favicon.ico'
             },
             timestamp: new Date().toISOString(),
         };
 
         const payload = JSON.stringify({
-            username: 'Target Auto Buyer',
+            username: 'Target Auto Buyer v4.0',
             avatar_url: 'https://assets.targetimg1.com/web/static-resources/favicons/favicon.ico',
             embeds: [embed],
         });
@@ -413,7 +505,6 @@
             console.log(`Target Bot: 💬 Discord embed notification sent (${event})`);
         } catch (err) {
             console.log(`Target Bot: ⚠️ Discord notification failed: ${err.message}`);
-            throw err;
         }
     }
 
@@ -448,6 +539,9 @@
         if (details.qty) {
             text += `🛒 <b>Quantity:</b> <code>${escapeHtml(String(details.qty))}</code>\n`;
         }
+        if (details.goal) {
+            text += `🎯 <b>Goal Progress:</b> <code>${escapeHtml(String(details.goal))}</code>\n`;
+        }
         if (details.metrics) {
             text += `⚡ <b>Latency:</b> <code>${escapeHtml(details.metrics)}</code>\n`;
         }
@@ -460,7 +554,7 @@
 
         const now = new Date().toLocaleTimeString('en-US', { hour12: false });
         text += `━━━━━━━━━━━━━━━━━━━━\n`;
-        text += `⏰ <i>${now} • Target Auto Buyer ⚡ v3.2</i>`;
+        text += `⏰ <i>${now} • Target Auto Buyer ⚡ v4.0</i>`;
 
         const url = `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`;
         const payload = JSON.stringify({
@@ -480,7 +574,6 @@
             console.log(`Target Bot: ✈️ Telegram notification sent (${event})`);
         } catch (err) {
             console.log(`Target Bot: ⚠️ Telegram notification failed: ${err.message}`);
-            throw err;
         }
     }
 
@@ -539,7 +632,7 @@
             if (GM_getValue('discordEnabled', false) && GM_getValue('notifyCart', true)) {
                 sendDiscordNotification('cart', {
                     title: '🛒 ADDED TO CART CONFIRMED!',
-                    message: `Item added to cart in **${elapsed}**! Redirecting to checkout...`,
+                    message: `Item added to cart in **${elapsed}**! Proceeding to checkout...`,
                     productName: title,
                     tcin: tcin || extractTcin(),
                     url: url,
@@ -583,15 +676,18 @@
             }
         },
 
-        async notifyOrderConfirmed() {
+        async notifyOrderConfirmed(qtyBought = 1) {
             const now = Date.now();
-            if (now - this.lastOrderNoticeTime < 30000) return;
+            if (now - this.lastOrderNoticeTime < 10000) return;
             this.lastOrderNoticeTime = now;
 
             const title = getProductTitle();
             const url = window.location.href;
             const tcin = extractTcin();
             const timingSummary = metrics.summary();
+            const currentTotal = getPurchasedCount();
+            const goalTotal = getTargetGoal();
+            const goalStr = `${currentTotal}/${goalTotal} units`;
 
             Sound.orderConfirmedAlert();
 
@@ -602,19 +698,24 @@
                     productName: title,
                     tcin: tcin,
                     url: url,
+                    qty: qtyBought,
+                    goal: goalStr,
                     metrics: timingSummary,
                     customFields: [
-                        { name: '✅ Status', value: 'Order Accepted & Confirmed', inline: true }
+                        { name: '✅ Status', value: 'Order Accepted & Confirmed', inline: true },
+                        { name: '🎯 Progress', value: goalStr, inline: true }
                     ]
                 }).catch(() => {});
             }
 
             if (GM_getValue('telegramEnabled', false) && GM_getValue('notifyOrder', true)) {
                 sendTelegramNotification('order', {
-                    message: 'Order confirmed by Target! Check your email and Target order history.',
+                    message: `Order confirmed by Target! Goal progress: ${goalStr}`,
                     productName: title,
                     tcin: tcin,
                     url: url,
+                    qty: qtyBought,
+                    goal: goalStr,
                     metrics: timingSummary,
                 }).catch(() => {});
             }
@@ -647,13 +748,11 @@
     };
 
     // =====================================================================
-    //  POLL INTERVAL — respects drop-mode and adaptive timing (P4.3)
+    //  POLL INTERVAL — respects drop-mode and adaptive timing
     // =====================================================================
     function getPollInterval() {
-        // Drop-mode override
         if (GM_getValue('dropMode', false)) return CFG.DROP_MODE_POLL_MS;
 
-        // Adaptive: auto-switch to aggressive near drop time (P4.3)
         const dropTime = GM_getValue('dropTime', '');
         if (dropTime) {
             const target = new Date(dropTime).getTime();
@@ -670,86 +769,278 @@
     }
 
     // =====================================================================
-    //  OUT-OF-STOCK DETECTION  (P3.4 — optimized, no body.innerText scan)
-    // =====================================================================
-    function isOutOfStock() {
-        // 1. Targeted selectors (fast)
-        const fastSelectors = [
-            '[data-test="outOfStockButton"]',
-            '[data-test="soldOutButton"]',
-            'button[disabled][data-test="shippingButton"]',
-        ];
-        for (const sel of fastSelectors) {
-            if ($(sel)) return true;
-        }
-
-        // 2. Bold text spans (Target's common OOS pattern)
-        for (const el of $$('span.h-text-bold')) {
-            const t = (el.textContent || '').trim().toLowerCase();
-            if (t.includes('out of stock') || t.includes('sold out')) return true;
-        }
-
-        // 3. Aria labels
-        for (const el of $$('button[aria-label], div[aria-label]')) {
-            const label = (el.getAttribute('aria-label') || '').toLowerCase();
-            if (label.includes('out of stock') || label.includes('sold out')) return true;
-        }
-
-        // 4. Fallback: visible XPath match (still avoids body.innerText)
-        const oosEl = xpath("//*[contains(translate(normalize-space(.), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'out of stock')]");
-        if (oosEl && isVisible(oosEl)) return true;
-
-        return false;
-    }
-
-    // =====================================================================
-    //  PRICE HELPERS
+    //  SMART PRICE PARSER (Fixes $800+ and Price Ranges)
     // =====================================================================
     function getCurrentPrice() {
-        const el = $('[data-test="product-price"]') || $('span.styles_currentPriceFontSize__Xps20');
-        if (!el) return null;
-        const v = parseFloat((el.textContent || '').replace(/[^0-9.]/g, ''));
-        return Number.isFinite(v) ? v : null;
+        const priceContainer =
+            $('[data-test="product-price"]') ||
+            $('[data-test="@web/Price/Large"]') ||
+            $('span.styles_currentPriceFontSize__Xps20') ||
+            $('div[data-test="product-price"]') ||
+            $('span[data-test="product-price"]');
+
+        if (!priceContainer) {
+            const priceEl = xpath("//*[contains(text(), '$') and (contains(@class, 'price') or contains(@data-test, 'price'))]");
+            if (priceEl) {
+                const m = (priceEl.textContent || '').match(/\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/);
+                if (m) return parseFloat(m[1].replace(/,/g, ''));
+            }
+            return null;
+        }
+
+        const firstSpan = priceContainer.querySelector('span') || priceContainer;
+        const rawText = (firstSpan.textContent || priceContainer.textContent || '').trim();
+
+        // Extract first valid dollar amount
+        const match = rawText.match(/\$\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/);
+        if (match) {
+            const val = parseFloat(match[1].replace(/,/g, ''));
+            return Number.isFinite(val) ? val : null;
+        }
+
+        const cleaned = rawText.split(/[-–—\s]|reg|was/i)[0].replace(/[^0-9.]/g, '');
+        const val = parseFloat(cleaned);
+        return Number.isFinite(val) ? val : null;
     }
+
     function getMaxPrice() {
         const v = parseFloat((GM_getValue('maxPrice', '0') || '0').toString().trim());
         return Number.isFinite(v) ? v : 0;
     }
 
     // =====================================================================
-    //  FIND ADD-TO-CART BUTTON — comprehensive selector list from live DOM
+    //  FIND ADD-TO-CART BUTTON — Comprehensive & Prioritized (Fixes Bug 1)
     // =====================================================================
     function findATCButton() {
-        // Target may render an ATC-shaped control before its fulfillment state updates.
-        if (isOutOfStock()) return null;
-
-        // Primary: data-test shipping button
-        let btn = $('button[data-test="shippingButton"]');
-        if (btn && isVisible(btn) && !isDisabled(btn)) return btn;
-
-        // By ID pattern: addToCartButtonOrTextIdFor<TCIN>
         const tcin = extractTcin();
+
+        // Priority 1: Direct active ATC / Shipping button
+        const selectors = [
+            'button[data-test="shippingButton"]:not([disabled])',
+            'button[data-test="shipItButton"]:not([disabled])',
+            'button[data-test="orderPickupButton"]:not([disabled])',
+            'button[data-test="addToCartButton"]:not([disabled])',
+        ];
+
         if (tcin) {
-            btn = $(`#addToCartButtonOrTextIdFor${tcin}`);
-            if (btn && isVisible(btn) && !isDisabled(btn)) return btn;
+            selectors.unshift(`button#addToCartButtonOrTextIdFor${tcin}:not([disabled])`);
+            selectors.unshift(`#addToCartButtonOrTextIdFor${tcin}:not([disabled])`);
+        }
+        selectors.push('button[id^="addToCartButtonOrTextIdFor"]:not([disabled])');
+
+        for (const sel of selectors) {
+            const btn = $(sel);
+            if (btn && isVisible(btn) && !isDisabled(btn)) {
+                return btn;
+            }
         }
 
-        // Generic ID prefix
-        btn = $('button[id^="addToCartButtonOrTextIdFor"]');
-        if (btn && isVisible(btn) && !isDisabled(btn)) return btn;
+        // Priority 2: Fulfillment selector needs to be clicked first (e.g. Shipping cell)
+        const shippingCell =
+            $('button[data-test="fulfillment-cell-shipping"]:not([disabled])') ||
+            $('div[data-test="fulfillment-cell-shipping"] button:not([disabled])') ||
+            $('input[type="radio"][value="SHIPPING"]') ||
+            $('button[data-test="@web/Fulfillment/ShippingButton"]:not([disabled])');
 
-        // XPath fallbacks
-        btn = xpath("//button[contains(text(),'Add to cart')]");
-        if (btn && isVisible(btn) && !isDisabled(btn)) return btn;
+        if (shippingCell && isVisible(shippingCell) && !isDisabled(shippingCell)) {
+            const isSelected = shippingCell.getAttribute('aria-checked') === 'true' ||
+                               shippingCell.classList.contains('selected') ||
+                               shippingCell.checked;
+            if (!isSelected) {
+                console.log('Target Bot: Selecting Shipping fulfillment option first...');
+                shippingCell.click();
+            }
+        }
 
-        btn = xpath("//button[text()='Preorder']") || xpath("//button[text()='Preorder now']");
-        if (btn && isVisible(btn) && !isDisabled(btn)) return btn;
+        // Priority 3: Visible text buttons (Add to cart, Preorder, Ship it)
+        const xpathList = [
+            "//button[not(@disabled) and (contains(normalize-space(.), 'Add to cart') or contains(normalize-space(.), 'Preorder') or contains(normalize-space(.), 'Preorder now') or contains(normalize-space(.), 'Ship it'))]",
+            "//button[not(@disabled) and @data-test='shippingButton']",
+            "//button[not(@disabled) and contains(@id, 'addToCart')]"
+        ];
+
+        for (const xp of xpathList) {
+            const btn = xpath(xp);
+            if (btn && isVisible(btn) && !isDisabled(btn)) {
+                return btn;
+            }
+        }
 
         return null;
     }
 
     // =====================================================================
-    //  API STOCK CHECK WITH RETRY + BACKOFF  (P3.1)
+    //  OUT-OF-STOCK DETECTION — Accurate (Doesn't falsely trigger on store pickup)
+    // =====================================================================
+    function isOutOfStock() {
+        // If an active, enabled ATC button is already present, it is DEFINITELY in stock!
+        if (findATCButton()) return false;
+
+        // Targeted explicit OOS selectors
+        const explicitOosSelectors = [
+            '[data-test="outOfStockButton"]',
+            '[data-test="soldOutButton"]',
+            'button[disabled][data-test="shippingButton"]',
+            'button[disabled][id^="addToCartButtonOrTextIdFor"]',
+        ];
+
+        for (const sel of explicitOosSelectors) {
+            const el = $(sel);
+            if (el && isVisible(el)) return true;
+        }
+
+        // Check if fulfillment shipping block specifically states Out of Stock
+        const shippingBlock = $('[data-test="fulfillment-cell-shipping"]') || $('[data-test="shipping-drawer"]');
+        if (shippingBlock) {
+            const text = (shippingBlock.textContent || '').toLowerCase();
+            if (text.includes('out of stock') || text.includes('sold out') || text.includes('unavailable')) {
+                return true;
+            }
+        }
+
+        // Global check ONLY if no fulfillment buttons exist at all
+        const allAtcButtons = $$('button[id*="addToCart"], button[data-test*="shippingButton"], button[data-test*="addToCart"]');
+        if (allAtcButtons.length > 0 && allAtcButtons.every(b => isDisabled(b))) {
+            return true;
+        }
+
+        return false;
+    }
+
+    // =====================================================================
+    //  QUANTITY CONTROLLER (Fixes Bug 2 — PDP, Drawer, and Cart Page)
+    // =====================================================================
+    const QuantityManager = {
+        // Step 1: PDP Quantity Setting
+        async applyQuantityOnPdp(targetQty) {
+            if (!targetQty || targetQty === '1') return true;
+
+            // A) Native <select>
+            const nativeSelect = $('select[data-test="quantity-select"]') || $('select[name="quantity"]') || $('select[id^="select-"]');
+            if (nativeSelect && isVisible(nativeSelect)) {
+                if (nativeSelect.value !== targetQty) {
+                    console.log(`Target Bot: Setting PDP native select quantity ${nativeSelect.value} → ${targetQty}`);
+                    nativeSelect.value = targetQty;
+                    nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+                    await sleep(150);
+                    return true;
+                }
+            }
+
+            // B) Target Custom Dropdown button
+            const qtyBtn = $('button[data-test="custom-quantity-picker"]') ||
+                           $('button[id^="select-"]') ||
+                           $('button[data-test="quantity-select"]') ||
+                           xpath("//button[contains(., 'Qty')]");
+
+            if (qtyBtn && isVisible(qtyBtn)) {
+                const currentText = (qtyBtn.innerText || qtyBtn.textContent || '').trim();
+                const currentNum = currentText.match(/\d+/)?.[0] || '1';
+
+                if (currentNum !== targetQty) {
+                    console.log(`Target Bot: PDP Quantity is ${currentNum}, aiming for ${targetQty}. Opening dropdown...`);
+                    qtyBtn.click();
+                    await sleep(150);
+
+                    // Find option matching targetQty
+                    const option =
+                        $(`div[role="listbox"] div[role="option"][data-value="${targetQty}"]`) ||
+                        $(`ul[role="listbox"] li[role="option"][data-value="${targetQty}"]`) ||
+                        $(`[data-test="select-option"][data-value="${targetQty}"]`) ||
+                        $(`ul.Options_styles_options__UapY8 a[aria-label="${targetQty}"]`) ||
+                        $(`ul a[aria-label="${targetQty}"]`) ||
+                        xpath(`//*[@role='option' and (normalize-space()='${targetQty}' or @data-value='${targetQty}')]`) ||
+                        xpath(`//button[normalize-space()='${targetQty}' or @data-value='${targetQty}']`);
+
+                    if (option) {
+                        console.log(`Target Bot: Selecting option ${targetQty}...`);
+                        option.click();
+                        await sleep(150);
+                        return true;
+                    } else {
+                        // If exact target not found, select max available option
+                        const allOptions = $$('[role="option"], ul a[aria-label]');
+                        if (allOptions.length > 0) {
+                            const lastOption = allOptions[allOptions.length - 1];
+                            console.log(`Target Bot: Option ${targetQty} capped. Selecting highest available option: ${lastOption.textContent?.trim()}`);
+                            lastOption.click();
+                            await sleep(150);
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // C) Numeric Stepper (+ button)
+            const plusBtn = $('button[data-test="stepper-plus"]') ||
+                            $('button[data-test="quantity-stepper-increment"]') ||
+                            $('button[aria-label="Increase quantity"]') ||
+                            xpath("//button[@aria-label='Increase quantity' or contains(@aria-label, 'increase')]");
+
+            if (plusBtn && isVisible(plusBtn) && !isDisabled(plusBtn)) {
+                let attempts = 0;
+                while (attempts < parseInt(targetQty, 10) - 1 && !isDisabled(plusBtn)) {
+                    plusBtn.click();
+                    attempts++;
+                    await sleep(100);
+                }
+                return true;
+            }
+
+            return false;
+        },
+
+        // Step 2: Cart Page /cart Quantity Maximizer
+        async applyQuantityOnCartPage(targetQty) {
+            if (!targetQty || targetQty === '1') return true;
+            console.log(`Target Bot: Checking/Adjusting cart quantity to ${targetQty}...`);
+
+            // A) Cart item <select>
+            const cartSelect = $('select[data-test="cartItem-qty"]') ||
+                               $('select[data-test="cart-item-qty"]') ||
+                               $('select[id^="cart-item-qty"]') ||
+                               $('select[name="quantity"]');
+
+            if (cartSelect && isVisible(cartSelect)) {
+                if (cartSelect.value !== targetQty) {
+                    // Check if option for targetQty exists
+                    const hasOption = Array.from(cartSelect.options).some(o => o.value === targetQty);
+                    if (hasOption) {
+                        console.log(`Target Bot: Cart select: setting quantity to ${targetQty}...`);
+                        cartSelect.value = targetQty;
+                    } else {
+                        // Select max allowed
+                        const maxOption = cartSelect.options[cartSelect.options.length - 1];
+                        console.log(`Target Bot: Cart limit detected. Selecting maximum allowed quantity: ${maxOption?.value}`);
+                        cartSelect.value = maxOption?.value || '1';
+                    }
+                    cartSelect.dispatchEvent(new Event('change', { bubbles: true }));
+                    await sleep(400);
+                    return true;
+                }
+            }
+
+            // B) Cart item Stepper
+            const plusBtn = $('button[data-test="cartItem-qty-increment"]') ||
+                            $('button[data-test="stepper-plus"]') ||
+                            $('button[aria-label="Increase quantity"]');
+
+            if (plusBtn && isVisible(plusBtn) && !isDisabled(plusBtn)) {
+                let count = 0;
+                while (count < parseInt(targetQty, 10) - 1 && !isDisabled(plusBtn)) {
+                    plusBtn.click();
+                    count++;
+                    await sleep(200);
+                }
+                return true;
+            }
+
+            return false;
+        }
+    };
+
+    // =====================================================================
+    //  API STOCK CHECK WITH RETRY + BACKOFF
     // =====================================================================
     async function checkStockApi(tcin) {
         const apiKey = '9f36aeafbe60771e321a7cc95a78140772ab3e96';
@@ -759,83 +1050,82 @@
             try {
                 const resp = await fetch(url, {
                     headers: { 'Accept': 'application/json' },
-                    cache: 'no-store',                         // Bypass browser cache
+                    cache: 'no-store',
                 });
 
                 if (resp.ok) {
                     const data = await resp.json();
                     const status = data?.data?.product?.fulfillment?.shipping_options?.availability_status;
-                    return status === 'IN_STOCK';
+                    // Also check partner fulfillment or general availability
+                    const storeStatus = data?.data?.product?.fulfillment?.store_options?.availability_status;
+                    return status === 'IN_STOCK' || storeStatus === 'IN_STOCK';
                 }
 
-                // Server error — retry with backoff
                 if (resp.status >= 500 && attempt < CFG.API_MAX_RETRIES) {
-                    console.log(`Target Bot: API ${resp.status} — retry ${attempt}/${CFG.API_MAX_RETRIES}`);
                     await sleep(CFG.API_RETRY_BASE_MS * attempt);
                     continue;
                 }
-                // 4xx — don't retry
                 return false;
             } catch (e) {
                 if (attempt < CFG.API_MAX_RETRIES) {
-                    console.log(`Target Bot: API error (attempt ${attempt}): ${e.message}`);
                     await sleep(CFG.API_RETRY_BASE_MS * attempt);
-                } else {
-                    console.log(`Target Bot: API failed after ${CFG.API_MAX_RETRIES} tries: ${e.message}`);
                 }
             }
         }
         return false;
     }
 
-    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
     // =====================================================================
-    //  STOCK POLLING — Aggressive, no page-reload  (P1.1, P1.2)
+    //  STOCK POLLING
     // =====================================================================
     async function pollStock(tcin) {
         if (!getTabRunning()) return;
         metrics.pollCount++;
         const pollNumber = metrics.pollCount;
-        console.log(`Target Bot: Checking stock for TCIN ${tcin} (check #${pollNumber})...`);
+        console.log(`Target Bot: Checking stock for TCIN ${tcin} (#${pollNumber})...`);
 
+        // Check DOM first
+        const directBtn = findATCButton();
+        if (directBtn) {
+            metrics.stockDetectedAt = Date.now();
+            console.log(`Target Bot: ✅ ATC button detected directly in DOM! (#${pollNumber})`);
+            Notifier.notifyStock(tcin, getCurrentPrice());
+            beginAddToCart(directBtn);
+            return;
+        }
+
+        // Query API
         const inStock = await checkStockApi(tcin);
 
         if (inStock) {
             metrics.stockDetectedAt = Date.now();
-            console.log(`Target Bot: ✅ IN STOCK detected via API! (check #${pollNumber})`);
+            console.log(`Target Bot: ✅ IN STOCK detected via API! (#${pollNumber})`);
             Notifier.notifyStock(tcin, getCurrentPrice());
 
-            // Phase 1.2: Try to click ATC directly WITHOUT page reload
             const btn = findATCButton();
             if (btn) {
-                console.log('Target Bot: ATC button available on current page — clicking directly.');
                 beginAddToCart(btn);
                 return;
             }
 
-            // Button not ready (page still shows OOS) — fast reload (no extra delay)
-            console.log('Target Bot: ATC button not ready. Fast-reloading page...');
+            console.log('Target Bot: ATC button not ready in DOM yet. Fast-reloading...');
             window.location.reload();
             return;
         }
 
-        console.log(`Target Bot: No in-stock result yet (check #${pollNumber}).`);
+        console.log(`Target Bot: Stock check #${pollNumber} — not in stock yet.`);
 
-        // Schedule next poll
         const interval = getPollInterval();
         clearTimeout(state.pollTimeout);
         state.pollTimeout = setTimeout(() => pollStock(tcin), interval);
     }
 
     // =====================================================================
-    //  PHASE 4.1 — DUAL-MODE MONITORING  (API polling + DOM observation)
+    //  DUAL-MODE MONITORING (API + DOM)
     // =====================================================================
     function startDualModeMonitoring(tcin) {
-        // A) Start API polling
         pollStock(tcin);
 
-        // B) Also watch DOM for button becoming enabled (catches React state updates)
         if (state.domObserver) state.domObserver.disconnect();
 
         state.domObserver = new MutationObserver(() => {
@@ -845,25 +1135,26 @@
                 console.log('Target Bot: ✅ ATC button appeared in DOM! Clicking immediately.');
                 metrics.stockDetectedAt = metrics.stockDetectedAt || Date.now();
                 Notifier.notifyStock(tcin, getCurrentPrice());
-                clearTimeout(state.pollTimeout); // Stop API polling
+                clearTimeout(state.pollTimeout);
                 state.domObserver.disconnect();
                 state.domObserver = null;
                 beginAddToCart(btn);
             }
         });
 
-        // Observe the product info area (scoped for performance)
         const target = $('[data-test="product-detail-highlights"]')?.parentElement || document.body;
         state.domObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled', 'aria-disabled'] });
     }
 
     // =====================================================================
-    //  ADD TO CART — with retry logic + MutationObserver  (P2.1, P3.2)
+    //  ADD TO CART
     // =====================================================================
     function beginAddToCart(button) {
         if (!getTabRunning()) return;
         state.atcRetries = 0;
         metrics.atcClickedAt = Date.now();
+        state.lastAddedTcin = extractTcin();
+        sendBroadcast('CLAIM_TCIN', { tcin: state.lastAddedTcin });
         clickATC(button);
     }
 
@@ -873,10 +1164,8 @@
         console.log(`Target Bot: 🛒 ATC click #${state.atcRetries}/${CFG.ATC_MAX_RETRIES}`);
         button.click();
 
-        // Start MutationObserver for cart confirmation (P2.1)
         watchForCartConfirmation();
 
-        // Timeout: retry or fallback (P3.2)
         clearTimeout(state.cartTimeout);
         state.cartTimeout = setTimeout(() => {
             if (!getTabRunning()) return;
@@ -888,20 +1177,18 @@
                 if (btn) {
                     clickATC(btn);
                 } else {
-                    // Button vanished — item may be in cart already
-                    console.log('Target Bot: ATC button gone. Navigating to checkout (item may be in cart)...');
-                    goToCheckout();
+                    console.log('Target Bot: ATC button gone. Navigating to cart/checkout...');
+                    goToCartOrCheckout();
                 }
             } else {
-                // Max retries — go to checkout anyway (optimistic)
-                console.log('Target Bot: Max ATC retries. Navigating to checkout...');
-                goToCheckout();
+                console.log('Target Bot: Max ATC retries. Navigating to cart/checkout...');
+                goToCartOrCheckout();
             }
         }, CFG.CART_CONFIRM_TIMEOUT_MS);
     }
 
     // =====================================================================
-    //  CART CONFIRMATION VIA MUTATIONOBSERVER  (P2.1, P2.2)
+    //  CART CONFIRMATION
     // =====================================================================
     function watchForCartConfirmation() {
         if (state.cartObserver) state.cartObserver.disconnect();
@@ -909,54 +1196,60 @@
         const checkCart = () => {
             if (!getTabRunning()) { state.cartObserver?.disconnect(); return; }
 
-            // Handle protection plan modal
-            const declineBtn = xpath("//button[contains(text(),'Decline coverage')]");
+            // Dismiss warranty / protection plan modals
+            const declineBtn = xpath("//button[contains(text(),'Decline coverage') or contains(text(),'No thanks') or contains(text(),'Decline')]");
             if (declineBtn && isVisible(declineBtn)) {
                 console.log('Target Bot: Declining protection plan...');
                 declineBtn.click();
             }
 
-            // Cart drawer confirmation texts (from live site inspection)
-            // "Added to cart" heading + "View cart & check out" button
+            // Check if cart drawer or redirect has occurred
             const viewCartBtn =
                 xpath("//a[contains(text(),'View cart')]")  ||
                 xpath("//button[contains(text(),'View cart')]") ||
-                xpath("//a[contains(text(),'check out')]");
+                xpath("//a[contains(text(),'check out')]") ||
+                $('[data-test="view-cart-checkout"]');
 
             const picker = $('button[data-test="custom-quantity-picker"]');
-            const addedHeading = xpath("//*[contains(text(),'Added to cart')]");
+            const addedHeading = xpath("//*[contains(text(),'Added to cart') or contains(text(),'added to your cart')]");
 
             if (viewCartBtn || (picker && picker.innerText.toLowerCase().includes('in cart')) || addedHeading) {
                 metrics.cartConfirmedAt = Date.now();
                 const elapsed = metrics.atcClickedAt ? ((metrics.cartConfirmedAt - metrics.atcClickedAt) / 1000).toFixed(2) : '?';
-                console.log(`Target Bot: ✅ Cart confirmed! (${elapsed}s) → Checkout`);
+                console.log(`Target Bot: ✅ Cart confirmed! (${elapsed}s) → Advancing to Cart/Checkout`);
                 Notifier.notifyCart(extractTcin());
 
                 clearTimeout(state.cartTimeout);
                 if (state.cartObserver) { state.cartObserver.disconnect(); state.cartObserver = null; }
 
-                goToCheckout();
+                goToCartOrCheckout();
                 return true;
             }
             return false;
         };
 
-        // Check immediately
         if (checkCart()) return;
 
-        // Observe DOM mutations
         state.cartObserver = new MutationObserver(checkCart);
         state.cartObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     // =====================================================================
-    //  NAVIGATE TO CHECKOUT
+    //  NAVIGATE TO CART OR CHECKOUT
     // =====================================================================
-    function goToCheckout() {
+    function goToCartOrCheckout() {
         if (!getTabRunning()) return;
         metrics.checkoutStartedAt = Date.now();
-        console.log('Target Bot: → Navigating to checkout...');
-        window.location.href = 'https://www.target.com/checkout';
+
+        const targetQty = GM_getValue('qty', '1');
+        // If target quantity > 1, routing through /cart ensures we can maximize quantity!
+        if (targetQty && parseInt(targetQty, 10) > 1) {
+            console.log(`Target Bot: Multi-quantity (${targetQty}) configured — routing via /cart to verify quantity...`);
+            window.location.href = 'https://www.target.com/cart';
+        } else {
+            console.log('Target Bot: → Navigating directly to checkout...');
+            window.location.href = 'https://www.target.com/checkout';
+        }
     }
 
     function hasOrderConfirmation() {
@@ -977,87 +1270,161 @@
     }
 
     // =====================================================================
-    //  PRODUCT PAGE HANDLER — orchestrates stock check → ATC → checkout
+    //  PRODUCT PAGE HANDLER — Orchestrator
     // =====================================================================
-    function handleProductPage() {
+    async function handleProductPage() {
         if (!getTabRunning()) return;
         console.log('Target Bot: Analyzing product page...');
 
-        // --- Out of stock? Start dual-mode monitoring ---
-        if (isOutOfStock()) {
-            console.log('Target Bot: ❌ Out of stock detected on page.');
-            const tcin = extractTcin();
-            if (tcin) {
-                console.log(`Target Bot: Starting dual-mode monitoring for TCIN ${tcin}...`);
-                startDualModeMonitoring(tcin);  // Phase 4.1
-            } else {
-                console.log('Target Bot: No TCIN found. Fast-retrying...');
-                clearTimeout(state.pollTimeout);
-                state.pollTimeout = setTimeout(() => {
-                    if (getTabRunning()) window.location.reload();
-                }, 2000);
-            }
-            return;
-        }
+        // 1. Check if an active ATC button is ready right now!
+        const immediateBtn = findATCButton();
+        if (immediateBtn) {
+            console.log('Target Bot: 🛒 Active Add-to-Cart button found immediately!');
 
-        // --- Price check ---
-        const maxPrice = getMaxPrice();
-        const currentPrice = getCurrentPrice();
-        if (maxPrice > 0 && currentPrice !== null && currentPrice > maxPrice) {
-            console.log(`Target Bot: Price $${currentPrice} > max $${maxPrice}. Monitoring for price drop...`);
-            const tcin = extractTcin();
-            if (tcin) startDualModeMonitoring(tcin);
-            return;
-        }
+            // Price check
+            const maxPrice = getMaxPrice();
+            const currentPrice = getCurrentPrice();
+            const skipPriceCheck = GM_getValue('skipPriceCheck', true);
 
-        // --- Quantity selection (minimized delay) ---
-        const targetQty = GM_getValue('qty', '1');
-        const qtyBtn = $('button[id^="select-"]') || xpath("//button[contains(., 'Qty')]");
-        if (qtyBtn) {
-            const qtyTextDiv = qtyBtn.querySelector('div');
-            const currentQty = qtyTextDiv ? qtyTextDiv.innerText.trim() : '';
-            if (currentQty && currentQty !== targetQty) {
-                console.log(`Target Bot: Quantity ${currentQty} → ${targetQty}`);
-                const optionLink =
-                    $(`ul.Options_styles_options__UapY8 a[aria-label="${targetQty}"]`) ||
-                    $(`ul a[aria-label="${targetQty}"]`);
-                if (optionLink) optionLink.click();
-                else qtyBtn.click();
-                setTimeout(handleProductPage, 250); // Reduced from 500ms
+            if (!skipPriceCheck && maxPrice > 0 && currentPrice !== null && currentPrice > maxPrice) {
+                console.log(`Target Bot: Price $${currentPrice} > max $${maxPrice}. Monitoring for price drop...`);
+                const tcin = extractTcin();
+                if (tcin) startDualModeMonitoring(tcin);
                 return;
             }
+
+            // Apply quantity on PDP if available
+            const targetQty = GM_getValue('qty', '1');
+            await QuantityManager.applyQuantityOnPdp(targetQty);
+
+            metrics.stockDetectedAt = metrics.stockDetectedAt || Date.now();
+            Notifier.notifyStock(extractTcin(), currentPrice);
+            beginAddToCart(immediateBtn);
+            return;
         }
 
-        // --- Find and click ATC ---
-        const btn = findATCButton();
-        if (btn) {
-            metrics.stockDetectedAt = metrics.stockDetectedAt || Date.now();
-            console.log('Target Bot: 🛒 ATC button found — clicking!');
-            Notifier.notifyStock(extractTcin(), currentPrice);
-            beginAddToCart(btn);
-        } else {
-            // Button not available yet — start dual-mode monitoring
+        // 2. Check if item is truly Out of Stock
+        if (isOutOfStock()) {
+            console.log('Target Bot: ❌ Item appears Out of Stock. Starting monitoring...');
             const tcin = extractTcin();
             if (tcin) {
-                console.log('Target Bot: ATC not clickable. Starting dual-mode monitoring...');
                 startDualModeMonitoring(tcin);
             } else {
-                console.log('Target Bot: ATC not available, no TCIN. Retrying in 2s...');
                 clearTimeout(state.pollTimeout);
                 state.pollTimeout = setTimeout(() => {
                     if (getTabRunning()) window.location.reload();
                 }, 2000);
             }
+            return;
+        }
+
+        // 3. Fallback: button not ready yet
+        const tcin = extractTcin();
+        if (tcin) {
+            console.log('Target Bot: ATC button loading... Starting dual-mode monitoring.');
+            startDualModeMonitoring(tcin);
+        } else {
+            clearTimeout(state.pollTimeout);
+            state.pollTimeout = setTimeout(() => {
+                if (getTabRunning()) window.location.reload();
+            }, 2000);
         }
     }
 
     // =====================================================================
-    //  CHECKOUT HANDLER — Fast loop, single-pass multi-step  (P1.4, P2.3)
+    //  DAY 2: POKEMON CATEGORY / SEARCH AUTO-SCANNER
+    // =====================================================================
+    async function handleSearchPage() {
+        if (!getTabRunning()) return;
+        console.log('Target Bot: 🔍 Scanning Search / Category page for in-stock Pokemon items...');
+
+        const autoScanEnabled = GM_getValue('pokemonAutoScan', true);
+        if (!autoScanEnabled) {
+            console.log('Target Bot: Pokemon Auto-Scan is disabled in settings.');
+            return;
+        }
+
+        const keywordsStr = GM_getValue('pokemonKeywords', '30th, ascended, pitch black, booster, elite trainer, scarlet, celebration');
+        const keywords = keywordsStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+
+        const blacklistStr = GM_getValue('pokemonBlacklist', 'shirt, socks, hoodie, costume, plush, binder, book, blanket');
+        const blacklist = blacklistStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+
+        const productCards = $$('[data-test="product-card"], [data-test="@web/site-top-of-funnel/ProductCardWrapper"], div[data-test="product-grid"] > div');
+        console.log(`Target Bot: Found ${productCards.length} product cards on page.`);
+
+        let matchFound = null;
+
+        for (const card of productCards) {
+            const titleEl = $('[data-test="product-title"]', card) || $('a[href*="/p/"]', card);
+            const title = (titleEl?.textContent || '').toLowerCase();
+            const link = $('a[href*="/p/"]', card)?.href;
+
+            if (!title || !link) continue;
+
+            // Check blacklist
+            if (blacklist.some(b => title.includes(b))) continue;
+
+            // Check whitelist
+            const isMatch = keywords.length === 0 || keywords.some(k => title.includes(k));
+            if (!isMatch) continue;
+
+            // Check if card has active ATC button
+            const cardAtc = $('button[data-test="shippingButton"]:not([disabled])', card) ||
+                            $('button[id*="addToCart"]:not([disabled])', card) ||
+                            xpath(".//button[not(@disabled) and contains(., 'Add to cart')]", card);
+
+            if (cardAtc && isVisible(cardAtc) && !isDisabled(cardAtc)) {
+                console.log(`Target Bot: 🎯 In-stock Pokemon match found on search page: "${title}"`);
+                matchFound = { link, btn: cardAtc };
+                break;
+            }
+
+            // Check if card shows in-stock status
+            const cardText = (card.textContent || '').toLowerCase();
+            if (!cardText.includes('out of stock') && !cardText.includes('sold out')) {
+                matchFound = { link, btn: null };
+                break;
+            }
+        }
+
+        if (matchFound) {
+            console.log(`Target Bot: 🚀 Navigating to matched product: ${matchFound.link}`);
+            window.location.href = matchFound.link;
+            return;
+        }
+
+        console.log('Target Bot: No available Pokemon products in current view. Re-scanning in 4 seconds...');
+        clearTimeout(state.searchPollTimeout);
+        state.searchPollTimeout = setTimeout(() => {
+            if (getTabRunning()) {
+                window.location.reload();
+            }
+        }, 4000);
+    }
+
+    // =====================================================================
+    //  DAY 2: MULTI-URL MONITOR MODE
+    // =====================================================================
+    function handleMultiUrlMonitor() {
+        const rawUrls = GM_getValue('multiUrls', '').trim();
+        if (!rawUrls) return false;
+
+        const urls = rawUrls.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+        if (urls.length <= 1) return false;
+
+        // Cycle through URLs if current URL is out of stock
+        console.log(`Target Bot: Multi-URL mode active with ${urls.length} URLs.`);
+        return true;
+    }
+
+    // =====================================================================
+    //  CHECKOUT HANDLER — Fast loop with Auto-CVV & Place Order
     // =====================================================================
     function handleCheckoutPage() {
         if (!getTabRunning()) return;
         console.log('Target Bot: Handling checkout page...');
-        if (state.checkoutLoop) return; // Already running
+        if (state.checkoutLoop) return;
 
         state.checkoutLoop = setInterval(() => {
             if (!getTabRunning()) {
@@ -1069,25 +1436,39 @@
 
             if (hasOrderConfirmation()) {
                 metrics.orderPlacedAt = Date.now();
-                console.log('Target Bot: 🎉 Order confirmation detected.');
-                console.log(`Target Bot: Metrics — ${metrics.summary()}`);
-                Notifier.notifyOrderConfirmed();
-                stopWithOrderStatus('Order confirmed successfully.', '✅ Order Confirmed');
+                const qtyBought = parseInt(GM_getValue('qty', '1'), 10) || 1;
+                const newTotal = incrementPurchasedCount(qtyBought);
+                const targetGoal = getTargetGoal();
+
+                console.log(`Target Bot: 🎉 Order confirmed! Total units: ${newTotal}/${targetGoal}`);
+                Notifier.notifyOrderConfirmed(qtyBought);
+
+                // Day 2 Repeat Purchase Loop
+                if (newTotal < targetGoal && GM_getValue('repeatPurchaseLoop', true)) {
+                    console.log(`Target Bot: 🔄 Repeat Purchase Loop: ${newTotal}/${targetGoal} purchased. Returning to product/monitor in 3s...`);
+                    updateStatusUI(true, `🔄 Bought ${newTotal}/${targetGoal}`);
+                    setTimeout(() => {
+                        const returnUrl = GM_getValue('lastProductUrl', '') || 'https://www.target.com/s?searchTerm=pokemon';
+                        window.location.href = returnUrl;
+                    }, 3000);
+                    return;
+                }
+
+                stopWithOrderStatus(`Order confirmed successfully. Goal reached: ${newTotal}/${targetGoal}`, '✅ Order Confirmed');
                 return;
             }
 
-            // Leaving checkout alone does not prove the order was accepted.
             if (!url.includes('/checkout') && !url.includes('/co-')) {
-                Notifier.notifyError('Checkout ended without a recognized order confirmation. Verify your Target account.');
-                stopWithOrderStatus('Checkout ended without a recognized order confirmation. Verify your Target account before retrying.', '⚠️ Verify Order');
+                Notifier.notifyError('Checkout ended without recognized order confirmation.');
+                stopWithOrderStatus('Checkout ended without recognized confirmation. Check your Target account.', '⚠️ Verify Order');
                 return;
             }
 
-            // === P3.3 — Detect cart-empty / item-removed errors ===
+            // Detect cart errors / sold out
             for (const msg of $$('[data-test="boxEmptyMsg"], [data-test="error-message"], [data-test="cartEmptyMessage"]')) {
                 const t = (msg.textContent || '').toLowerCase();
                 if (t.includes('removed') || t.includes('empty') || t.includes('no longer available') || t.includes('sold out')) {
-                    console.log('Target Bot: ⚠️ Item removed from cart during checkout! Going back...');
+                    console.log('Target Bot: ⚠️ Item was removed from cart or sold out!');
                     Notifier.notifyError('Item was removed from cart or sold out during checkout!');
                     clearInterval(state.checkoutLoop); state.checkoutLoop = null;
                     window.history.back();
@@ -1095,9 +1476,7 @@
                 }
             }
 
-            // === SINGLE-PASS CHECKOUT STEPS (P2.3) ===
-
-            // 1. Login — fill password + click in same pass
+            // 1. Login password
             const passField = $('#password');
             const loginBtn  = $('#login');
             if (passField && isVisible(passField)) {
@@ -1111,13 +1490,13 @@
                     console.log('Target Bot: Clicked Login');
                     return;
                 }
-                if (passField.value) return; // Wait for login button to enable
+                if (passField.value) return;
             }
 
-            // 2. Skip button (mobile number, etc.)
+            // 2. Skip prompts
             const skipBtn = xpath("//a[normalize-space()='Skip']") || xpath("//button[normalize-space()='Skip']");
             if (skipBtn && isVisible(skipBtn)) {
-                console.log('Target Bot: Clicking Skip');
+                console.log('Target Bot: Clicking Skip...');
                 skipBtn.click();
                 return;
             }
@@ -1125,29 +1504,29 @@
             // 3. Save and continue
             const sncBtn = xpath("//button[contains(text(),'Save and continue')]");
             if (sncBtn && isVisible(sncBtn) && !isDisabled(sncBtn)) {
-                console.log('Target Bot: Clicking Save and Continue');
+                console.log('Target Bot: Clicking Save and Continue...');
                 sncBtn.click();
                 return;
             }
 
-            // 4. CVV — fill + confirm in same pass (P2.4)
-            const cvvField    = $('#enter-cvv');
-            const confirmBtn  = $('button[data-test="confirm-button"]');
+            // 4. CVV auto-fill
+            const cvvField   = $('#enter-cvv') || $('input[data-test="credit-card-cvv-input"]') || $('input[id*="cvv"]');
+            const confirmBtn = $('button[data-test="confirm-button"]');
             if (cvvField && !cvvField.disabled && isVisible(cvvField)) {
-                const cvv = GM_getValue('cvv', '');
-                if (cvv && (!cvvField.value || cvvField.value !== cvv)) {
+                const activeCvv = getActiveAccountCvv();
+                if (activeCvv && (!cvvField.value || cvvField.value !== activeCvv)) {
                     console.log('Target Bot: Entering CVV...');
-                    setNativeValue(cvvField, cvv);
+                    setNativeValue(cvvField, activeCvv);
                 }
-                if (cvvField.value === cvv && confirmBtn && !isDisabled(confirmBtn)) {
+                if (cvvField.value === activeCvv && confirmBtn && !isDisabled(confirmBtn)) {
                     confirmBtn.click();
                     console.log('Target Bot: Confirmed CVV');
                     return;
                 }
-                if (cvvField.value === cvv) return; // Wait for confirm button
+                if (cvvField.value === activeCvv) return;
             }
 
-            // Submit only once; a slow response must not create a duplicate order.
+            // 5. Place Order button
             const placeBtn = $('button[data-test="placeOrderButton"]');
             if (placeBtn && !isDisabled(placeBtn) && isVisible(placeBtn)) {
                 if (!state.placeOrderAttempted) {
@@ -1162,7 +1541,7 @@
                     const errorMessage = error && isVisible(error) ? error.textContent.trim() : '';
                     if (errorMessage && errorMessage !== state.placeOrderError) {
                         state.placeOrderError = errorMessage;
-                        console.log(`Target Bot: ⚠️ Checkout returned an error after submission: ${errorMessage}`);
+                        console.log(`Target Bot: ⚠️ Checkout error after submission: ${errorMessage}`);
                     }
                 }
             }
@@ -1170,7 +1549,44 @@
     }
 
     // =====================================================================
-    //  PHASE 4.2 — SESSION PRE-WARMING
+    //  CART PAGE HANDLER — Quantity Adjust + Auto-Checkout
+    // =====================================================================
+    async function handleCartPage() {
+        if (!getTabRunning()) return;
+        console.log('Target Bot: On Cart page — verifying quantity and advancing to checkout...');
+
+        const targetQty = GM_getValue('qty', '1');
+        await QuantityManager.applyQuantityOnCartPage(targetQty);
+
+        const clickCartCheckout = () => {
+            if (!getTabRunning()) return true;
+
+            const checkoutBtn =
+                $('button[data-test="checkout-button"]') ||
+                $('[data-test="checkout-button-primary"]') ||
+                $('[data-test="order-summary-checkout-button"]') ||
+                xpath("//button[contains(.,'Check out') or contains(.,'check out') or contains(.,'Sign in to check out')]");
+
+            if (checkoutBtn && isVisible(checkoutBtn) && !isDisabled(checkoutBtn)) {
+                console.log('Target Bot: 🛒 Checkout button clicked on cart page!');
+                metrics.checkoutStartedAt = metrics.checkoutStartedAt || Date.now();
+                checkoutBtn.click();
+                return true;
+            }
+            return false;
+        };
+
+        if (clickCartCheckout()) return;
+
+        const cartInterval = setInterval(() => {
+            if (!getTabRunning() || clickCartCheckout()) {
+                clearInterval(cartInterval);
+            }
+        }, 100);
+    }
+
+    // =====================================================================
+    //  SESSION PRE-WARMING
     // =====================================================================
     async function preWarmSession() {
         try {
@@ -1183,65 +1599,47 @@
             if (state.sessionValid) {
                 console.log('Target Bot: ✅ Session is valid (pre-warmed)');
             } else {
-                console.log(`Target Bot: ⚠️ Session may need re-auth (status ${resp.status})`);
+                console.log(`Target Bot: ⚠️ Session check status: ${resp.status}`);
             }
         } catch (e) {
-            console.log(`Target Bot: Session check failed: ${e.message}`);
             state.sessionValid = null;
         }
     }
 
     // =====================================================================
-    //  CART PAGE HANDLER — fast auto-checkout from /cart
+    //  ACTIVE ACCOUNT CVV RESOLVER (Multi-Account Support)
     // =====================================================================
-    function handleCartPage() {
-        if (!getTabRunning()) return;
-        console.log('Target Bot: On Cart page — looking for Checkout button...');
-
-        const clickCartCheckout = () => {
-            if (!getTabRunning()) return true;
-
-            const checkoutBtn =
-                $('button[data-test="checkout-button"]') ||
-                $('[data-test="checkout-button-primary"]') ||
-                $('[data-test="order-summary-checkout-button"]') ||
-                xpath("//button[contains(.,'Check out') or contains(.,'check out') or contains(.,'Sign in to check out')]");
-
-            if (checkoutBtn && isVisible(checkoutBtn) && !isDisabled(checkoutBtn)) {
-                console.log('Target Bot: 🛒 Checkout button found on cart page — clicking!');
-                metrics.checkoutStartedAt = metrics.checkoutStartedAt || Date.now();
-                checkoutBtn.click();
-                return true;
+    function getActiveAccountCvv() {
+        const activeProfileIdx = parseInt(GM_getValue('activeAccountIndex', '0'), 10) || 0;
+        const profilesRaw = GM_getValue('accountProfiles', '[]');
+        try {
+            const profiles = JSON.parse(profilesRaw);
+            if (profiles[activeProfileIdx] && profiles[activeProfileIdx].cvv) {
+                return profiles[activeProfileIdx].cvv;
             }
-            return false;
-        };
-
-        if (clickCartCheckout()) return;
-
-        // Poll fast (100ms) for checkout button to appear
-        const cartInterval = setInterval(() => {
-            if (!getTabRunning() || clickCartCheckout()) {
-                clearInterval(cartInterval);
-            }
-        }, 100);
+        } catch (e) {}
+        return GM_getValue('cvv', '');
     }
 
     // =====================================================================
-    //  STATE MACHINE — routes to the right handler
+    //  STATE MACHINE — Routes to proper handler
     // =====================================================================
     function runBot() {
         if (!getTabRunning()) return;
 
         const url = window.location.href;
 
-        if (url.includes('target.com/p/') || url.includes('target.com/s/')) {
+        if (url.includes('target.com/p/')) {
+            GM_setValue('lastProductUrl', url);
             handleProductPage();
-        } else if (url.includes('target.com/cart')) {
+        } else if (url.includes('target.com/s?') || url.includes('target.com/c/')) {
+            handleSearchPage();
+        } else if (url.includes('target.com/cart') || url.includes('target.com/co-cart')) {
             handleCartPage();
         } else if (url.includes('/checkout') || url.includes('/co-')) {
             handleCheckoutPage();
         } else {
-            console.log('Target Bot: Navigate to a product page or cart to begin.');
+            console.log('Target Bot: Navigate to a product page, search page, or cart to begin.');
         }
     }
 
@@ -1264,8 +1662,15 @@
         if (el) el.textContent = metrics.summary();
     }
 
+    function updateGoalUI() {
+        const el = $('#bot-goal-display');
+        if (el) {
+            el.textContent = `${getPurchasedCount()} / ${getTargetGoal()} units`;
+        }
+    }
+
     // =====================================================================
-    //  UI CREATION  (Preserved design + Drop Mode toggle + Drop Timer + Metrics)
+    //  UI CREATION — Modern Tabbed Dashboard (Day 1, 2 & 3 Integrated)
     // =====================================================================
     function createUI() {
         if ($('#target-bot-ui')) return;
@@ -1276,61 +1681,67 @@
                 right: 18px;
                 bottom: 18px;
                 z-index: 999999;
-                font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+                font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
                 color: #111827;
             }
             #target-bot-ui .tb-card {
-                width: 340px;
-                border-radius: 14px;
-                background: rgba(255, 255, 255, 0.92);
-                border: 1px solid rgba(17, 24, 39, 0.12);
-                box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+                width: 380px;
+                border-radius: 16px;
+                background: rgba(255, 255, 255, 0.94);
+                border: 1px solid rgba(17, 24, 39, 0.14);
+                box-shadow: 0 20px 48px rgba(0, 0, 0, 0.22);
                 overflow: hidden;
-                backdrop-filter: blur(8px);
+                backdrop-filter: blur(10px);
                 transition: width 160ms ease;
-                max-height: 90vh;
+                max-height: 92vh;
                 display: flex;
                 flex-direction: column;
             }
             #target-bot-ui.tb-minimized .tb-card {
                 width: auto;
             }
-            #target-bot-ui.tb-minimized .tb-body {
+            #target-bot-ui.tb-minimized .tb-body,
+            #target-bot-ui.tb-minimized .tb-tabs {
                 display: none;
             }
             #target-bot-ui.tb-large .tb-card {
-                width: 460px;
-            }
-            #target-bot-ui .tb-size-toggle {
-                border: 1px solid rgba(255, 255, 255, 0.35);
-                border-radius: 999px;
-                padding: 4px 8px;
-                background: rgba(255, 255, 255, 0.16);
-                color: inherit;
-                font: inherit;
-                font-size: 10px;
-                font-weight: 700;
-                cursor: pointer;
+                width: 480px;
             }
             #target-bot-ui .tb-header {
                 padding: 12px 14px;
-                background: linear-gradient(135deg, #cc0000 0%, #ff3b30 100%);
+                background: linear-gradient(135deg, #cc0000 0%, #ff2d20 100%);
                 color: #ffffff;
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                gap: 12px;
                 cursor: grab;
                 user-select: none;
-                touch-action: none;
             }
             #target-bot-ui .tb-header:active {
                 cursor: grabbing;
             }
-            #target-bot-ui .tb-header-actions {
+            #target-bot-ui .tb-title-group {
                 display: flex;
                 align-items: center;
                 gap: 8px;
+            }
+            #target-bot-ui .tb-title {
+                font-size: 14px;
+                font-weight: 800;
+                letter-spacing: 0.2px;
+            }
+            #target-bot-ui .tb-pill {
+                font-size: 10px;
+                font-weight: 800;
+                padding: 3px 7px;
+                border-radius: 999px;
+                background: rgba(255, 255, 255, 0.22);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+            }
+            #target-bot-ui .tb-header-actions {
+                display: flex;
+                align-items: center;
+                gap: 6px;
             }
             #target-bot-ui .tb-icon-btn {
                 width: 26px;
@@ -1340,33 +1751,47 @@
                 justify-content: center;
                 border: 1px solid rgba(255, 255, 255, 0.35);
                 border-radius: 8px;
-                padding: 0;
-                background: rgba(255, 255, 255, 0.16);
-                color: inherit;
-                font: inherit;
-                font-size: 17px;
-                line-height: 1;
+                background: rgba(255, 255, 255, 0.18);
+                color: #fff;
+                font-size: 14px;
                 cursor: pointer;
             }
-            #target-bot-ui .tb-title {
-                font-size: 14px;
-                font-weight: 800;
-                letter-spacing: 0.2px;
-                line-height: 1.1;
+            /* Navigation Tabs */
+            #target-bot-ui .tb-tabs {
+                display: flex;
+                background: rgba(17, 24, 39, 0.04);
+                border-bottom: 1px solid rgba(17, 24, 39, 0.08);
+                overflow-x: auto;
             }
-            #target-bot-ui .tb-pill {
+            #target-bot-ui .tb-tab-btn {
+                flex: 1;
+                padding: 9px 6px;
+                border: none;
+                background: transparent;
                 font-size: 11px;
                 font-weight: 700;
-                padding: 4px 8px;
-                border-radius: 999px;
-                background: rgba(255, 255, 255, 0.18);
-                border: 1px solid rgba(255, 255, 255, 0.25);
+                color: #6b7280;
+                cursor: pointer;
+                text-align: center;
                 white-space: nowrap;
+                transition: all 120ms ease;
+                border-bottom: 2px solid transparent;
+            }
+            #target-bot-ui .tb-tab-btn.active {
+                color: #cc0000;
+                border-bottom-color: #cc0000;
+                background: rgba(204, 0, 0, 0.04);
             }
             #target-bot-ui .tb-body {
                 padding: 12px 14px 14px;
                 overflow-y: auto;
-                max-height: calc(90vh - 54px);
+                max-height: calc(92vh - 96px);
+            }
+            #target-bot-ui .tb-tab-content {
+                display: none;
+            }
+            #target-bot-ui .tb-tab-content.active {
+                display: block;
             }
             #target-bot-ui .tb-grid-2 {
                 display: grid;
@@ -1378,124 +1803,52 @@
             }
             #target-bot-ui .tb-label {
                 display: block;
-                font-size: 12px;
+                font-size: 11px;
                 font-weight: 700;
                 color: #374151;
-                margin-bottom: 6px;
+                margin-bottom: 5px;
             }
             #target-bot-ui .tb-input {
                 width: 100%;
                 box-sizing: border-box;
-                padding: 10px 10px;
-                border-radius: 10px;
+                padding: 9px 10px;
+                border-radius: 9px;
                 border: 1px solid rgba(17, 24, 39, 0.16);
                 background: #ffffff;
                 outline: none;
-                font-size: 13px;
-                transition: border-color 140ms ease, box-shadow 140ms ease;
+                font-size: 12px;
+                transition: border-color 140ms ease;
             }
             #target-bot-ui .tb-input:focus {
-                border-color: rgba(204, 0, 0, 0.5);
-                box-shadow: 0 0 0 4px rgba(204, 0, 0, 0.12);
+                border-color: #cc0000;
             }
-            #target-bot-ui .tb-status-row {
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-                margin: 10px 0 8px;
-                padding: 10px 10px;
-                border-radius: 12px;
-                background: rgba(17, 24, 39, 0.04);
-                border: 1px solid rgba(17, 24, 39, 0.08);
-            }
-            #target-bot-ui .tb-status-value {
-                font-size: 12px;
-                font-weight: 800;
-                padding: 4px 8px;
-                border-radius: 999px;
-                background: rgba(255, 255, 255, 0.8);
-                border: 1px solid rgba(17, 24, 39, 0.08);
-            }
-            #target-bot-ui .tb-metrics {
-                font-size: 10px;
-                font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-                color: #6b7280;
-                padding: 6px 10px;
-                margin-bottom: 8px;
-                border-radius: 8px;
-                background: rgba(17, 24, 39, 0.03);
-                border: 1px solid rgba(17, 24, 39, 0.06);
-                overflow-x: auto;
-                white-space: nowrap;
-            }
-            #target-bot-ui .tb-log {
-                width: 100%;
-                height: 120px;
-                max-height: 30vh;
-                border-radius: 12px;
-                border: 1px solid rgba(17, 24, 39, 0.12);
-                background: #111827;
-                color: #e5e7eb;
-                font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            #target-bot-ui textarea.tb-input {
+                resize: vertical;
+                min-height: 60px;
+                font-family: ui-monospace, monospace;
                 font-size: 11px;
-                line-height: 1.5;
-                overflow-y: auto;
-                padding: 10px 10px;
-                box-sizing: border-box;
-                white-space: pre-wrap;
-            }
-            #target-bot-ui .tb-actions {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 10px;
-                margin-top: 12px;
-            }
-            #target-bot-ui .tb-btn {
-                border: none;
-                border-radius: 12px;
-                padding: 10px 12px;
-                font-size: 13px;
-                font-weight: 800;
-                cursor: pointer;
-                transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
-            }
-            #target-bot-ui .tb-btn:active {
-                transform: translateY(1px);
-            }
-            #target-bot-ui .tb-btn-primary {
-                background: linear-gradient(135deg, #16a34a 0%, #22c55e 100%);
-                color: #ffffff;
-                box-shadow: 0 10px 18px rgba(34, 197, 94, 0.22);
-            }
-            #target-bot-ui .tb-btn-danger {
-                background: linear-gradient(135deg, #b91c1c 0%, #ef4444 100%);
-                color: #ffffff;
-                box-shadow: 0 10px 18px rgba(239, 68, 68, 0.22);
-            }
-            #target-bot-ui .tb-btn:hover {
-                filter: brightness(1.03);
             }
             #target-bot-ui .tb-toggle-row {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                margin-bottom: 10px;
-                padding: 8px 10px;
-                border-radius: 10px;
+                margin-bottom: 8px;
+                padding: 7px 10px;
+                border-radius: 9px;
                 background: rgba(17, 24, 39, 0.03);
                 border: 1px solid rgba(17, 24, 39, 0.08);
             }
             #target-bot-ui .tb-toggle-label {
-                font-size: 12px;
+                font-size: 11px;
                 font-weight: 700;
                 color: #374151;
             }
             #target-bot-ui .tb-switch {
                 position: relative;
-                width: 40px;
-                height: 22px;
+                width: 38px;
+                height: 20px;
                 background: #d1d5db;
-                border-radius: 11px;
+                border-radius: 10px;
                 cursor: pointer;
                 transition: background 200ms;
                 flex-shrink: 0;
@@ -1508,8 +1861,8 @@
                 position: absolute;
                 top: 2px;
                 left: 2px;
-                width: 18px;
-                height: 18px;
+                width: 16px;
+                height: 16px;
                 border-radius: 50%;
                 background: #fff;
                 box-shadow: 0 1px 3px rgba(0,0,0,0.2);
@@ -1518,79 +1871,86 @@
             #target-bot-ui .tb-switch.active::after {
                 transform: translateX(18px);
             }
-            #target-bot-ui .tb-section-label {
-                font-size: 11px;
-                font-weight: 800;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-                color: #9ca3af;
-                margin: 12px 0 6px;
-            }
-            #target-bot-ui .tb-accordion-header {
+            #target-bot-ui .tb-status-row {
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                padding: 9px 10px;
-                background: rgba(17, 24, 39, 0.04);
-                border: 1px solid rgba(17, 24, 39, 0.09);
+                margin: 10px 0 8px;
+                padding: 8px 10px;
                 border-radius: 10px;
-                cursor: pointer;
-                font-size: 12px;
-                font-weight: 700;
-                color: #1f2937;
-                margin: 10px 0 6px;
-                user-select: none;
-                transition: background 140ms ease;
+                background: rgba(17, 24, 39, 0.04);
+                border: 1px solid rgba(17, 24, 39, 0.08);
             }
-            #target-bot-ui .tb-accordion-header:hover {
-                background: rgba(17, 24, 39, 0.08);
-            }
-            #target-bot-ui .tb-accordion-body {
-                padding: 4px 2px 8px;
-                display: none;
-            }
-            #target-bot-ui .tb-accordion-body.open {
-                display: block;
-            }
-            #target-bot-ui .tb-test-btn {
-                padding: 5px 10px;
-                border-radius: 8px;
+            #target-bot-ui .tb-status-value {
                 font-size: 11px;
-                font-weight: 700;
-                border: 1px solid rgba(17, 24, 39, 0.15);
-                background: #ffffff;
-                color: #374151;
-                cursor: pointer;
-                transition: all 120ms ease;
+                font-weight: 800;
+                padding: 3px 8px;
+                border-radius: 999px;
+                background: rgba(255, 255, 255, 0.9);
+                border: 1px solid rgba(17, 24, 39, 0.08);
             }
-            #target-bot-ui .tb-test-btn:hover {
-                background: #f3f4f6;
-                border-color: #9ca3af;
+            #target-bot-ui .tb-metrics {
+                font-size: 10px;
+                font-family: ui-monospace, monospace;
+                color: #6b7280;
+                padding: 5px 8px;
+                margin-bottom: 8px;
+                border-radius: 8px;
+                background: rgba(17, 24, 39, 0.03);
+                border: 1px solid rgba(17, 24, 39, 0.06);
+                white-space: nowrap;
+                overflow-x: auto;
             }
-            #target-bot-ui .tb-checkbox-group {
+            #target-bot-ui .tb-log {
+                width: 100%;
+                height: 110px;
+                border-radius: 10px;
+                background: #111827;
+                color: #e5e7eb;
+                font-family: ui-monospace, monospace;
+                font-size: 10px;
+                line-height: 1.4;
+                overflow-y: auto;
+                padding: 8px;
+                box-sizing: border-box;
+                white-space: pre-wrap;
+            }
+            #target-bot-ui .tb-actions {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
-                gap: 6px;
-                margin-top: 6px;
-                font-size: 11px;
-                font-weight: 600;
-                color: #4b5563;
+                gap: 8px;
+                margin-top: 10px;
             }
-            #target-bot-ui .tb-checkbox-item {
-                display: flex;
-                align-items: center;
-                gap: 6px;
+            #target-bot-ui .tb-btn {
+                border: none;
+                border-radius: 10px;
+                padding: 9px 12px;
+                font-size: 12px;
+                font-weight: 800;
                 cursor: pointer;
             }
-            @media (max-width: 520px) {
-                #target-bot-ui {
-                    right: 8px;
-                    bottom: 8px;
-                }
-                #target-bot-ui .tb-card,
-                #target-bot-ui.tb-large .tb-card {
-                    width: min(460px, calc(100vw - 16px));
-                }
+            #target-bot-ui .tb-btn-primary {
+                background: linear-gradient(135deg, #16a34a 0%, #22c55e 100%);
+                color: #ffffff;
+            }
+            #target-bot-ui .tb-btn-danger {
+                background: linear-gradient(135deg, #b91c1c 0%, #ef4444 100%);
+                color: #ffffff;
+            }
+            #target-bot-ui .tb-btn-secondary {
+                background: #f3f4f6;
+                color: #374151;
+                border: 1px solid rgba(17, 24, 39, 0.15);
+            }
+            #target-bot-ui .tb-account-badge {
+                display: inline-block;
+                padding: 3px 6px;
+                border-radius: 6px;
+                background: #e0f2fe;
+                color: #0369a1;
+                font-size: 10px;
+                font-weight: 700;
+                margin-right: 4px;
             }
         `);
 
@@ -1600,135 +1960,202 @@
         const isMinimized = GM_getValue('uiMinimized', false);
         ui.classList.toggle('tb-large', isLarge);
         ui.classList.toggle('tb-minimized', isMinimized);
+
         ui.innerHTML = `
             <div class="tb-card">
                 <div class="tb-header">
-                    <div class="tb-title">Target Auto Buyer</div>
+                    <div class="tb-title-group">
+                        <div class="tb-title">Target Auto Buyer</div>
+                        <div class="tb-pill">v4.0 ⚡</div>
+                    </div>
                     <div class="tb-header-actions">
-                        <div class="tb-pill">v3.2 ⚡</div>
-                        <button id="bot-size-toggle" class="tb-size-toggle" type="button" aria-label="Switch panel size">${isLarge ? 'Compact' : 'Large'}</button>
-                        <button id="bot-minimize-toggle" class="tb-icon-btn" type="button" aria-controls="bot-panel-body" aria-expanded="${!isMinimized}" aria-label="${isMinimized ? 'Restore panel' : 'Minimize panel'}">${isMinimized ? '□' : '−'}</button>
+                        <button id="bot-size-toggle" class="tb-icon-btn" type="button" title="Panel Size">${isLarge ? '⊟' : '⊞'}</button>
+                        <button id="bot-minimize-toggle" class="tb-icon-btn" type="button" title="Minimize">${isMinimized ? '□' : '−'}</button>
                     </div>
                 </div>
+
+                <div class="tb-tabs">
+                    <button class="tb-tab-btn active" data-tab="tab-drop">⚡ Drop</button>
+                    <button class="tb-tab-btn" data-tab="tab-pokemon">🔍 Pokemon</button>
+                    <button class="tb-tab-btn" data-tab="tab-accounts">👥 Accounts</button>
+                    <button class="tb-tab-btn" data-tab="tab-alerts">🔔 Alerts</button>
+                    <button class="tb-tab-btn" data-tab="tab-logs">📋 Logs</button>
+                </div>
+
                 <div id="bot-panel-body" class="tb-body">
-                    <div class="tb-grid-2">
-                        <div class="tb-field">
-                            <label class="tb-label" for="bot-qty">Quantity</label>
-                            <input class="tb-input" type="number" id="bot-qty" min="1" max="10" value="${GM_getValue('qty', '1')}" />
+                    <!-- TAB 1: DROP & CHECKOUT -->
+                    <div id="tab-drop" class="tb-tab-content active">
+                        <div class="tb-grid-2">
+                            <div class="tb-field">
+                                <label class="tb-label" for="bot-qty">Quantity</label>
+                                <input class="tb-input" type="number" id="bot-qty" min="1" max="100" value="${GM_getValue('qty', '1')}" />
+                            </div>
+                            <div class="tb-field">
+                                <label class="tb-label" for="bot-max-price">Max Price ($0=any)</label>
+                                <input class="tb-input" type="number" id="bot-max-price" min="0" step="0.01" value="${GM_getValue('maxPrice', '0')}" />
+                            </div>
                         </div>
-                        <div class="tb-field">
-                            <label class="tb-label" for="bot-max-price">Max Price ($0=any)</label>
-                            <input class="tb-input" type="number" id="bot-max-price" min="0" step="0.01" value="${GM_getValue('maxPrice', '0')}" />
+
+                        <div class="tb-toggle-row">
+                            <span class="tb-toggle-label">Skip Price Check for Marketplace</span>
+                            <div id="bot-skip-price" class="tb-switch ${GM_getValue('skipPriceCheck', true) ? 'active' : ''}"></div>
+                        </div>
+
+                        <div class="tb-grid-2">
+                            <div class="tb-field">
+                                <label class="tb-label" for="bot-cvv">Default CVV</label>
+                                <input class="tb-input" type="text" id="bot-cvv" maxlength="4" value="${GM_getValue('cvv', '')}" />
+                            </div>
+                            <div class="tb-field">
+                                <label class="tb-label" for="bot-drop-time">Drop Time</label>
+                                <input class="tb-input" type="datetime-local" id="bot-drop-time" value="${GM_getValue('dropTime', '')}" />
+                            </div>
+                        </div>
+
+                        <div class="tb-toggle-row">
+                            <span class="tb-toggle-label">⚡ Drop Mode (250ms polls)</span>
+                            <div id="bot-drop-mode" class="tb-switch ${GM_getValue('dropMode', false) ? 'active' : ''}"></div>
+                        </div>
+
+                        <div class="tb-status-row">
+                            <span class="tb-label" style="margin: 0;">Goal Progress</span>
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <span id="bot-goal-display" class="tb-status-value">${getPurchasedCount()} / ${getTargetGoal()} units</span>
+                                <button type="button" id="bot-reset-goal" class="tb-btn tb-btn-secondary" style="padding: 2px 6px; font-size: 10px;" title="Reset goal progress counter to 0">Reset</button>
+                            </div>
                         </div>
                     </div>
 
-                    <div class="tb-field">
-                        <label class="tb-label" for="bot-cvv">CVV</label>
-                        <input class="tb-input" type="text" id="bot-cvv" maxlength="4" value="${GM_getValue('cvv', '')}" />
+                    <!-- TAB 2: POKEMON & AUTO-MONITOR -->
+                    <div id="tab-pokemon" class="tb-tab-content">
+                        <div class="tb-toggle-row">
+                            <span class="tb-toggle-label">🔍 Auto-Scan Pokemon Categories</span>
+                            <div id="bot-pokemon-autoscan" class="tb-switch ${GM_getValue('pokemonAutoScan', true) ? 'active' : ''}"></div>
+                        </div>
+
+                        <div class="tb-toggle-row">
+                            <span class="tb-toggle-label">🔄 Repeat Purchase Loop (Auto-Rebuy)</span>
+                            <div id="bot-repeat-loop" class="tb-switch ${GM_getValue('repeatPurchaseLoop', true) ? 'active' : ''}"></div>
+                        </div>
+
+                        <div class="tb-field">
+                            <label class="tb-label" for="bot-target-goal">Total Purchase Goal (units)</label>
+                            <input class="tb-input" type="number" id="bot-target-goal" min="1" max="10000" value="${GM_getValue('targetGoal', '1000')}" />
+                        </div>
+
+                        <div class="tb-field">
+                            <label class="tb-label" for="bot-pokemon-keywords">Whitelist Keywords (comma separated)</label>
+                            <input class="tb-input" type="text" id="bot-pokemon-keywords" value="${GM_getValue('pokemonKeywords', '30th, ascended, pitch black, booster, elite trainer, scarlet, celebration')}" />
+                        </div>
+
+                        <div class="tb-field">
+                            <label class="tb-label" for="bot-pokemon-blacklist">Blacklist Keywords (skip plush, clothes, etc.)</label>
+                            <input class="tb-input" type="text" id="bot-pokemon-blacklist" value="${GM_getValue('pokemonBlacklist', 'shirt, socks, hoodie, costume, plush, binder, book, blanket')}" />
+                        </div>
+
+                        <div class="tb-field">
+                            <label class="tb-label" for="bot-multi-urls">Multi-URL Monitor (1 Target product URL per line)</label>
+                            <textarea class="tb-input" id="bot-multi-urls" placeholder="https://www.target.com/p/...">${GM_getValue('multiUrls', '')}</textarea>
+                        </div>
                     </div>
 
-                    <div class="tb-section-label">Speed Settings</div>
-                    <div class="tb-grid-2">
+                    <!-- TAB 3: MULTI-ACCOUNT & PROXY -->
+                    <div id="tab-accounts" class="tb-tab-content">
                         <div class="tb-field">
-                            <label class="tb-label" for="bot-min-delay">Poll Min (ms)</label>
-                            <input class="tb-input" type="number" id="bot-min-delay" value="${GM_getValue('minDelay', String(CFG.POLL_MIN_MS))}" />
+                            <label class="tb-label">Multi-Tab Status</label>
+                            <div style="font-size: 11px; color: #4b5563; background: #f3f4f6; padding: 8px; border-radius: 8px;">
+                                Current Tab: <span class="tb-account-badge">${tabId}</span>
+                                <div>Tabs coordinate live via BroadcastChannel.</div>
+                            </div>
                         </div>
+
+                        <div class="tb-section-label" style="font-size: 11px; font-weight: 800; color: #374151; margin-bottom: 6px;">Add New Account</div>
+                        <div class="tb-grid-2" style="margin-bottom: 6px;">
+                            <input class="tb-input" type="text" id="bot-new-acc-name" placeholder="Account Name / Email" />
+                            <input class="tb-input" type="text" id="bot-new-acc-cvv" maxlength="4" placeholder="CVV" />
+                        </div>
+                        <button type="button" id="bot-add-acc-btn" class="tb-btn tb-btn-secondary" style="width: 100%; margin-bottom: 10px; padding: 6px;">+ Add Account</button>
+
                         <div class="tb-field">
-                            <label class="tb-label" for="bot-max-delay">Poll Max (ms)</label>
-                            <input class="tb-input" type="number" id="bot-max-delay" value="${GM_getValue('maxDelay', String(CFG.POLL_MAX_MS))}" />
+                            <label class="tb-label">Configured Accounts</label>
+                            <div id="bot-accounts-list" style="max-height: 100px; overflow-y: auto; background: #fff; border: 1px solid rgba(17,24,39,0.12); border-radius: 8px; padding: 6px;"></div>
+                        </div>
+
+                        <div class="tb-field">
+                            <label class="tb-label">🌐 Proxy Setup Guide</label>
+                            <div style="font-size: 10px; color: #4b5563; line-height: 1.4; background: #f8fafc; padding: 8px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                                For running multiple Target accounts, use <b>US Residential Proxies</b> (e.g. Smartproxy, Bright Data). Bind each browser profile to a distinct proxy IP using <i>Proxy SwitchyOmega</i> or antidetect browsers.
+                            </div>
                         </div>
                     </div>
 
-                    <div class="tb-toggle-row">
-                        <span class="tb-toggle-label">⚡ Drop Mode (${CFG.DROP_MODE_POLL_MS}ms polls)</span>
-                        <div id="bot-drop-mode" class="tb-switch ${GM_getValue('dropMode', false) ? 'active' : ''}"></div>
-                    </div>
-
-                    <div class="tb-section-label">Drop Timer</div>
-                    <div class="tb-grid-2">
-                        <div class="tb-field">
-                            <label class="tb-label" for="bot-drop-time">Drop Time</label>
-                            <input class="tb-input" type="datetime-local" id="bot-drop-time" value="${GM_getValue('dropTime', '')}" />
-                        </div>
-                        <div class="tb-field">
-                            <label class="tb-label">Countdown</label>
-                            <div id="bot-drop-countdown" class="tb-input" style="display:flex;align-items:center;color:#6b7280;cursor:default;">—</div>
-                        </div>
-                    </div>
-
-                    <!-- Notifications & Sound Section -->
-                    <div class="tb-accordion-header" id="bot-notif-accordion-header">
-                        <span>🔔 Alerts & Notifications</span>
-                        <span id="bot-notif-chevron" style="transition: transform 200ms ease; font-size: 10px;">${GM_getValue('uiNotifOpen', false) ? '▲' : '▼'}</span>
-                    </div>
-                    <div id="bot-notif-accordion-body" class="tb-accordion-body ${GM_getValue('uiNotifOpen', false) ? 'open' : ''}">
-                        <!-- Sound settings -->
-                        <div class="tb-toggle-row" style="margin-bottom: 6px;">
+                    <!-- TAB 4: ALERTS & WEBHOOKS -->
+                    <div id="tab-alerts" class="tb-tab-content">
+                        <div class="tb-toggle-row">
                             <span class="tb-toggle-label">🔊 Audio Alerts</span>
-                            <div style="display:flex; align-items:center; gap:8px;">
-                                <button type="button" id="bot-test-sound" class="tb-test-btn" title="Test audio playback">Test</button>
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <button type="button" id="bot-test-sound" class="tb-btn tb-btn-secondary" style="padding: 3px 8px; font-size: 10px;">Test</button>
                                 <div id="bot-sound-mode" class="tb-switch ${GM_getValue('soundEnabled', true) ? 'active' : ''}"></div>
                             </div>
                         </div>
 
-                        <!-- Discord settings -->
-                        <div class="tb-toggle-row" style="margin-bottom: 6px;">
+                        <div class="tb-toggle-row">
                             <span class="tb-toggle-label">💬 Discord Webhook</span>
                             <div id="bot-discord-mode" class="tb-switch ${GM_getValue('discordEnabled', false) ? 'active' : ''}"></div>
                         </div>
                         <div id="bot-discord-fields" style="${GM_getValue('discordEnabled', false) ? '' : 'display:none;'} margin-bottom: 8px;">
-                            <div class="tb-field" style="margin-bottom: 4px;">
-                                <input class="tb-input" type="text" id="bot-discord-webhook" placeholder="https://discord.com/api/webhooks/..." value="${GM_getValue('discordWebhook', '')}" />
-                            </div>
-                            <button type="button" id="bot-test-discord" class="tb-test-btn" style="width: 100%;">Test Discord Webhook</button>
+                            <input class="tb-input" type="text" id="bot-discord-webhook" placeholder="https://discord.com/api/webhooks/..." value="${GM_getValue('discordWebhook', '')}" />
+                            <button type="button" id="bot-test-discord" class="tb-btn tb-btn-secondary" style="width: 100%; margin-top: 4px; padding: 4px;">Test Discord</button>
                         </div>
 
-                        <!-- Telegram settings -->
-                        <div class="tb-toggle-row" style="margin-bottom: 6px;">
+                        <div class="tb-toggle-row">
                             <span class="tb-toggle-label">✈️ Telegram Bot</span>
                             <div id="bot-telegram-mode" class="tb-switch ${GM_getValue('telegramEnabled', false) ? 'active' : ''}"></div>
                         </div>
                         <div id="bot-telegram-fields" style="${GM_getValue('telegramEnabled', false) ? '' : 'display:none;'} margin-bottom: 8px;">
-                            <div class="tb-field" style="margin-bottom: 4px;">
-                                <input class="tb-input" type="text" id="bot-telegram-token" placeholder="Bot Token (e.g. 123456:ABC...)" value="${GM_getValue('telegramToken', '')}" />
-                            </div>
-                            <div class="tb-field" style="margin-bottom: 4px;">
-                                <input class="tb-input" type="text" id="bot-telegram-chat-id" placeholder="Chat ID (e.g. 123456789)" value="${GM_getValue('telegramChatId', '')}" />
-                            </div>
-                            <button type="button" id="bot-test-telegram" class="tb-test-btn" style="width: 100%;">Test Telegram Message</button>
-                        </div>
-
-                        <!-- Event preferences -->
-                        <div class="tb-section-label" style="margin-top: 8px;">Notify On Events</div>
-                        <div class="tb-checkbox-group">
-                            <label class="tb-checkbox-item"><input type="checkbox" id="bot-notify-stock" ${GM_getValue('notifyStock', true) ? 'checked' : ''}/> In-Stock</label>
-                            <label class="tb-checkbox-item"><input type="checkbox" id="bot-notify-cart" ${GM_getValue('notifyCart', true) ? 'checked' : ''}/> Cart Added</label>
-                            <label class="tb-checkbox-item"><input type="checkbox" id="bot-notify-order" ${GM_getValue('notifyOrder', true) ? 'checked' : ''}/> Order Placed</label>
-                            <label class="tb-checkbox-item"><input type="checkbox" id="bot-notify-error" ${GM_getValue('notifyError', true) ? 'checked' : ''}/> Errors/Alerts</label>
+                            <input class="tb-input" style="margin-bottom: 4px;" type="text" id="bot-telegram-token" placeholder="Bot Token" value="${GM_getValue('telegramToken', '')}" />
+                            <input class="tb-input" type="text" id="bot-telegram-chat-id" placeholder="Chat ID" value="${GM_getValue('telegramChatId', '')}" />
+                            <button type="button" id="bot-test-telegram" class="tb-btn tb-btn-secondary" style="width: 100%; margin-top: 4px; padding: 4px;">Test Telegram</button>
                         </div>
                     </div>
 
+                    <!-- TAB 5: LOGS & METRICS -->
+                    <div id="tab-logs" class="tb-tab-content">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 4px;">
+                            <span class="tb-label" style="margin:0;">Latency & Stages</span>
+                            <button type="button" id="bot-clear-logs" class="tb-btn tb-btn-secondary" style="padding: 2px 6px; font-size: 10px;">Clear Logs</button>
+                        </div>
+                        <div id="bot-metrics" class="tb-metrics">Waiting...</div>
+                        <div id="bot-log-area" class="tb-log"></div>
+                    </div>
+
+                    <!-- FOOTER ACTIONS & STATUS -->
                     <div class="tb-status-row">
                         <span class="tb-label" style="margin: 0;">Status</span>
                         <span id="bot-status" class="tb-status-value" style="color: ${getTabRunning() ? '#16a34a' : '#b91c1c'};">${getTabRunning() ? 'Running' : 'Stopped'}</span>
                     </div>
 
-                    <div id="bot-metrics" class="tb-metrics">Waiting...</div>
-
-                    <div class="tb-field" style="margin-bottom: 0;">
-                        <label class="tb-label" for="bot-log-area">Logs</label>
-                        <div id="bot-log-area" class="tb-log"></div>
-                    </div>
-
                     <div class="tb-actions">
-                        <button id="bot-start" class="tb-btn tb-btn-primary">▶ Start</button>
-                        <button id="bot-stop"  class="tb-btn tb-btn-danger">■ Stop</button>
+                        <button id="bot-start" class="tb-btn tb-btn-primary">▶ Start Bot</button>
+                        <button id="bot-stop"  class="tb-btn tb-btn-danger">■ Stop Bot</button>
                     </div>
                 </div>
             </div>
         `;
         document.body.appendChild(ui);
 
+        // Tab Switching Logic
+        $$('.tb-tab-btn', ui).forEach(btn => {
+            btn.addEventListener('click', () => {
+                $$('.tb-tab-btn', ui).forEach(b => b.classList.remove('active'));
+                $$('.tb-tab-content', ui).forEach(c => c.classList.remove('active'));
+                btn.classList.add('active');
+                const targetId = btn.getAttribute('data-tab');
+                $(`#${targetId}`, ui)?.classList.add('active');
+            });
+        });
+
+        // Window dragging & sizing
         const keepUIInViewport = () => {
             const rect = ui.getBoundingClientRect();
             const left = Math.min(Math.max(0, rect.left), Math.max(0, window.innerWidth - ui.offsetWidth));
@@ -1742,10 +2169,8 @@
 
         const savedPosition = GM_getValue('uiPosition', null);
         if (savedPosition && Number.isFinite(savedPosition.left) && Number.isFinite(savedPosition.top)) {
-            const maxLeft = Math.max(0, window.innerWidth - ui.offsetWidth);
-            const maxTop = Math.max(0, window.innerHeight - ui.offsetHeight);
-            ui.style.left = `${Math.min(Math.max(0, savedPosition.left), maxLeft)}px`;
-            ui.style.top = `${Math.min(Math.max(0, savedPosition.top), maxTop)}px`;
+            ui.style.left = `${Math.min(Math.max(0, savedPosition.left), window.innerWidth - ui.offsetWidth)}px`;
+            ui.style.top = `${Math.min(Math.max(0, savedPosition.top), window.innerHeight - ui.offsetHeight)}px`;
             ui.style.right = 'auto';
             ui.style.bottom = 'auto';
         }
@@ -1779,16 +2204,12 @@
         };
         header.addEventListener('pointerup', stopDragging);
         header.addEventListener('pointercancel', stopDragging);
-        window.addEventListener('resize', () => {
-            GM_setValue('uiPosition', keepUIInViewport());
-        });
 
         $('#bot-size-toggle').addEventListener('click', () => {
             const large = !ui.classList.contains('tb-large');
             ui.classList.toggle('tb-large', large);
             GM_setValue('uiSize', large ? 'large' : 'compact');
-            $('#bot-size-toggle').textContent = large ? 'Compact' : 'Large';
-            $('#bot-size-toggle').setAttribute('aria-label', large ? 'Use compact panel' : 'Use large panel');
+            $('#bot-size-toggle').textContent = large ? '⊟' : '⊞';
             GM_setValue('uiPosition', keepUIInViewport());
         });
 
@@ -1797,217 +2218,207 @@
             ui.classList.toggle('tb-minimized', minimized);
             GM_setValue('uiMinimized', minimized);
             $('#bot-minimize-toggle').textContent = minimized ? '□' : '−';
-            $('#bot-minimize-toggle').setAttribute('aria-expanded', String(!minimized));
-            $('#bot-minimize-toggle').setAttribute('aria-label', minimized ? 'Restore panel' : 'Minimize panel');
             GM_setValue('uiPosition', keepUIInViewport());
         });
 
-        // --- Wire up input persistence ---
+        // Save inputs
         const save = () => {
-            GM_setValue('qty',              $('#bot-qty')?.value || '1');
-            GM_setValue('maxPrice',         $('#bot-max-price')?.value || '0');
-            GM_setValue('cvv',              $('#bot-cvv')?.value || '');
-            GM_setValue('minDelay',         $('#bot-min-delay')?.value || String(CFG.POLL_MIN_MS));
-            GM_setValue('maxDelay',         $('#bot-max-delay')?.value || String(CFG.POLL_MAX_MS));
-            GM_setValue('dropTime',         $('#bot-drop-time')?.value || '');
-            GM_setValue('discordWebhook',   $('#bot-discord-webhook')?.value?.trim() || '');
-            GM_setValue('telegramToken',    $('#bot-telegram-token')?.value?.trim() || '');
-            GM_setValue('telegramChatId',   $('#bot-telegram-chat-id')?.value?.trim() || '');
-            GM_setValue('notifyStock',      $('#bot-notify-stock')?.checked ?? true);
-            GM_setValue('notifyCart',       $('#bot-notify-cart')?.checked ?? true);
-            GM_setValue('notifyOrder',      $('#bot-notify-order')?.checked ?? true);
-            GM_setValue('notifyError',      $('#bot-notify-error')?.checked ?? true);
+            GM_setValue('qty',                 $('#bot-qty')?.value || '1');
+            GM_setValue('maxPrice',            $('#bot-max-price')?.value || '0');
+            GM_setValue('cvv',                 $('#bot-cvv')?.value || '');
+            GM_setValue('dropTime',            $('#bot-drop-time')?.value || '');
+            GM_setValue('targetGoal',          $('#bot-target-goal')?.value || '1000');
+            GM_setValue('pokemonKeywords',     $('#bot-pokemon-keywords')?.value || '');
+            GM_setValue('pokemonBlacklist',    $('#bot-pokemon-blacklist')?.value || '');
+            GM_setValue('multiUrls',           $('#bot-multi-urls')?.value || '');
+            GM_setValue('accountProfiles',     $('#bot-account-profiles')?.value || '[]');
+            GM_setValue('activeAccountIndex',  $('#bot-active-account')?.value || '0');
+            GM_setValue('discordWebhook',      $('#bot-discord-webhook')?.value?.trim() || '');
+            GM_setValue('telegramToken',       $('#bot-telegram-token')?.value?.trim() || '');
+            GM_setValue('telegramChatId',      $('#bot-telegram-chat-id')?.value?.trim() || '');
+            updateGoalUI();
         };
 
         [
-            'bot-qty', 'bot-max-price', 'bot-cvv', 'bot-min-delay', 'bot-max-delay', 'bot-drop-time',
-            'bot-discord-webhook', 'bot-telegram-token', 'bot-telegram-chat-id',
-            'bot-notify-stock', 'bot-notify-cart', 'bot-notify-order', 'bot-notify-error'
+            'bot-qty', 'bot-max-price', 'bot-cvv', 'bot-drop-time', 'bot-target-goal',
+            'bot-pokemon-keywords', 'bot-pokemon-blacklist', 'bot-multi-urls',
+            'bot-account-profiles', 'bot-active-account',
+            'bot-discord-webhook', 'bot-telegram-token', 'bot-telegram-chat-id'
         ].forEach(id => {
             const el = $(`#${id}`);
             if (el) el.addEventListener('change', save);
         });
 
-        // Notifications accordion toggle
-        const notifAccordionHeader = $('#bot-notif-accordion-header');
-        const notifAccordionBody   = $('#bot-notif-accordion-body');
-        const notifChevron         = $('#bot-notif-chevron');
-        if (notifAccordionHeader && notifAccordionBody) {
-            notifAccordionHeader.addEventListener('click', () => {
-                const isOpen = notifAccordionBody.classList.toggle('open');
-                GM_setValue('uiNotifOpen', isOpen);
-                if (notifChevron) notifChevron.textContent = isOpen ? '▲' : '▼';
+        // Toggles
+        const setupToggle = (id, key, callback) => {
+            const el = $(`#${id}`);
+            if (!el) return;
+            el.addEventListener('click', () => {
+                const active = !el.classList.contains('active');
+                el.classList.toggle('active', active);
+                GM_setValue(key, active);
+                if (callback) callback(active);
             });
-        }
+        };
 
-        // Sound mode toggle
-        const soundToggle = $('#bot-sound-mode');
-        if (soundToggle) {
-            soundToggle.addEventListener('click', () => {
-                const active = !soundToggle.classList.contains('active');
-                soundToggle.classList.toggle('active', active);
-                GM_setValue('soundEnabled', active);
-                console.log(`Target Bot: Audio Alerts ${active ? 'ON 🔊' : 'OFF'}`);
-            });
-        }
+        setupToggle('bot-skip-price', 'skipPriceCheck');
+        setupToggle('bot-drop-mode', 'dropMode');
+        setupToggle('bot-pokemon-autoscan', 'pokemonAutoScan');
+        setupToggle('bot-repeat-loop', 'repeatPurchaseLoop');
+        setupToggle('bot-sound-mode', 'soundEnabled');
+        setupToggle('bot-discord-mode', 'discordEnabled', active => {
+            const f = $('#bot-discord-fields');
+            if (f) f.style.display = active ? 'block' : 'none';
+        });
+        setupToggle('bot-telegram-mode', 'telegramEnabled', active => {
+            const f = $('#bot-telegram-fields');
+            if (f) f.style.display = active ? 'block' : 'none';
+        });
 
-        // Test Sound button
-        const testSoundBtn = $('#bot-test-sound');
-        if (testSoundBtn) {
-            testSoundBtn.addEventListener('click', () => {
-                Sound.getContext();
-                console.log('Target Bot: 🔊 Playing test audio chime...');
-                Sound.orderConfirmedAlert();
-            });
-        }
+        // Test buttons
+        $('#bot-test-sound')?.addEventListener('click', () => {
+            Sound.getContext();
+            Sound.orderConfirmedAlert();
+        });
 
-        // Discord toggle
-        const discordToggle = $('#bot-discord-mode');
-        const discordFields = $('#bot-discord-fields');
-        if (discordToggle) {
-            discordToggle.addEventListener('click', () => {
-                const active = !discordToggle.classList.contains('active');
-                discordToggle.classList.toggle('active', active);
-                GM_setValue('discordEnabled', active);
-                if (discordFields) discordFields.style.display = active ? 'block' : 'none';
-                console.log(`Target Bot: Discord Notifications ${active ? 'ON 💬' : 'OFF'}`);
-            });
-        }
+        $('#bot-test-discord')?.addEventListener('click', async () => {
+            save();
+            try {
+                await sendDiscordNotification('test', {
+                    title: '🧪 DISCORD TEST SUCCESSFUL',
+                    message: 'Target Auto Buyer v4.0 is connected to your Discord channel!',
+                    productName: 'Pokemon 30th Anniversary Celebration Box',
+                    price: '$389.99',
+                    qty: '1',
+                    goal: `${getPurchasedCount()}/${getTargetGoal()} units`,
+                });
+            } catch (e) {}
+        });
 
-        // Test Discord button
-        const testDiscordBtn = $('#bot-test-discord');
-        if (testDiscordBtn) {
-            testDiscordBtn.addEventListener('click', async () => {
-                save();
-                const webhook = GM_getValue('discordWebhook', '').trim();
-                if (!webhook) {
-                    console.log('Target Bot: ⚠️ Enter a Discord Webhook URL first.');
-                    return;
-                }
-                console.log('Target Bot: 📨 Sending test message to Discord...');
-                try {
-                    await sendDiscordNotification('test', {
-                        title: '🧪 DISCORD WEBHOOK TEST SUCCESSFUL',
-                        message: 'Your Discord webhook is linked correctly! You will receive formatted drop alerts with product links, pricing, quantity, and order statuses.',
-                        productName: 'Sample Product Test (PlayStation 5)',
-                        tcin: '88492049',
-                        price: '$499.99',
-                        qty: '1',
-                        metrics: 'Test Latency: 0.15s',
-                        customFields: [
-                            { name: '🟢 Webhook Status', value: 'Connected & Verified', inline: true }
-                        ]
-                    });
-                    console.log('Target Bot: ✅ Discord test notification sent successfully!');
-                } catch (e) {
-                    console.log(`Target Bot: ❌ Discord test failed: ${e.message}`);
-                }
-            });
-        }
-
-        // Telegram toggle
-        const telegramToggle = $('#bot-telegram-mode');
-        const telegramFields = $('#bot-telegram-fields');
-        if (telegramToggle) {
-            telegramToggle.addEventListener('click', () => {
-                const active = !telegramToggle.classList.contains('active');
-                telegramToggle.classList.toggle('active', active);
-                GM_setValue('telegramEnabled', active);
-                if (telegramFields) telegramFields.style.display = active ? 'block' : 'none';
-                console.log(`Target Bot: Telegram Notifications ${active ? 'ON ✈️' : 'OFF'}`);
-            });
-        }
-
-        // Test Telegram button
-        const testTelegramBtn = $('#bot-test-telegram');
-        if (testTelegramBtn) {
-            testTelegramBtn.addEventListener('click', async () => {
-                save();
-                const token = GM_getValue('telegramToken', '').trim();
-                const chatId = GM_getValue('telegramChatId', '').trim();
-                if (!token || !chatId) {
-                    console.log('Target Bot: ⚠️ Enter both Telegram Bot Token and Chat ID first.');
-                    return;
-                }
-                console.log('Target Bot: 📨 Sending test message to Telegram...');
-                try {
-                    await sendTelegramNotification('test', {
-                        message: 'Your Telegram bot is configured and communicating properly! You will receive live alerts for in-stock drops, cart progress, and order confirmation.',
-                        productName: 'Sample Product Test (PlayStation 5)',
-                        tcin: '88492049',
-                        price: '$499.99',
-                        qty: '1',
-                        metrics: 'Test Latency: 0.15s',
-                    });
-                    console.log('Target Bot: ✅ Telegram test message sent successfully!');
-                } catch (e) {
-                    console.log(`Target Bot: ❌ Telegram test failed: ${e.message}`);
-                }
-            });
-        }
-
-        // Drop-mode toggle
-        const dropToggle = $('#bot-drop-mode');
-        dropToggle.addEventListener('click', () => {
-            const active = !dropToggle.classList.contains('active');
-            dropToggle.classList.toggle('active', active);
-            GM_setValue('dropMode', active);
-            console.log(`Target Bot: Drop Mode ${active ? 'ON ⚡' : 'OFF'}`);
+        $('#bot-test-telegram')?.addEventListener('click', async () => {
+            save();
+            try {
+                await sendTelegramNotification('test', {
+                    message: 'Target Auto Buyer v4.0 is connected to your Telegram chat!',
+                    productName: 'Pokemon 30th Anniversary Celebration Box',
+                    price: '$389.99',
+                    qty: '1',
+                    goal: `${getPurchasedCount()}/${getTargetGoal()} units`,
+                });
+            } catch (e) {}
         });
 
         // Start / Stop
-        $('#bot-start').addEventListener('click', () => {
-            Sound.getContext(); // Unlock audio context on user gesture
+        $('#bot-start')?.addEventListener('click', () => {
+            Sound.getContext();
             save();
             setTabRunning(true);
             updateStatusUI(true);
             metrics.reset();
             state.placeOrderAttempted = false;
-
-            // Phase 4.2: Pre-warm session on start
+            sendBroadcast('GLOBAL_START');
             preWarmSession().then(() => runBot());
         });
 
-        $('#bot-stop').addEventListener('click', () => {
+        $('#bot-stop')?.addEventListener('click', () => {
             setTabRunning(false);
             updateStatusUI(false);
             stopAllTimers();
+            sendBroadcast('GLOBAL_STOP');
         });
 
-        // --- Drop Timer Countdown (P4.4) ---
-        state.dropTimerInterval = setInterval(() => {
-            const cdEl = $('#bot-drop-countdown');
-            if (!cdEl) return;
+        // Reset Goal counter
+        $('#bot-reset-goal')?.addEventListener('click', () => {
+            GM_setValue('purchasedCount', '0');
+            updateGoalUI();
+            console.log('Target Bot: Goal counter reset to 0.');
+        });
 
-            const dropTime = GM_getValue('dropTime', '');
-            if (!dropTime) { cdEl.textContent = '—'; return; }
+        // Clear Logs
+        $('#bot-clear-logs')?.addEventListener('click', () => {
+            const logArea = $('#bot-log-area');
+            if (logArea) logArea.textContent = '';
+        });
 
-            const target = new Date(dropTime).getTime();
-            const now = Date.now();
-            const diff = target - now;
+        // Visual Account Manager
+        const renderAccounts = () => {
+            const listEl = $('#bot-accounts-list');
+            if (!listEl) return;
+            const profilesRaw = GM_getValue('accountProfiles', '[{"name":"Account 1","cvv":""}]');
+            let profiles = [];
+            try { profiles = JSON.parse(profilesRaw); } catch (e) { profiles = []; }
 
-            if (diff <= 0) {
-                cdEl.textContent = '🔴 NOW!';
-                cdEl.style.color = '#dc2626';
-                cdEl.style.fontWeight = '800';
-            } else {
-                const h = Math.floor(diff / 3600000);
-                const m = Math.floor((diff % 3600000) / 60000);
-                const s = Math.floor((diff % 60000) / 1000);
-                cdEl.textContent = `${h}h ${m}m ${s}s`;
-                cdEl.style.color = diff <= CFG.ADAPTIVE_LEAD_SEC * 1000 ? '#f59e0b' : '#6b7280';
-                cdEl.style.fontWeight = diff <= CFG.ADAPTIVE_LEAD_SEC * 1000 ? '800' : '400';
+            const activeIdx = parseInt(GM_getValue('activeAccountIndex', '0'), 10) || 0;
+            listEl.innerHTML = '';
+
+            if (profiles.length === 0) {
+                listEl.innerHTML = '<div style="font-size:10px; color:#9ca3af; text-align:center;">No accounts added yet.</div>';
+                return;
             }
-        }, 1000);
 
-        // --- Periodic metrics update ---
+            profiles.forEach((acc, idx) => {
+                const item = document.createElement('div');
+                item.style.cssText = `display:flex; justify-content:space-between; align-items:center; padding:4px 6px; font-size:11px; border-bottom:1px solid #f3f4f6; ${idx === activeIdx ? 'background:#eff6ff; border-radius:4px;' : ''}`;
+                item.innerHTML = `
+                    <div style="display:flex; align-items:center; gap:6px; overflow:hidden;">
+                        <input type="radio" name="active-acc" ${idx === activeIdx ? 'checked' : ''} style="cursor:pointer;" />
+                        <span style="font-weight:${idx === activeIdx ? '800' : '500'}; color:${idx === activeIdx ? '#1d4ed8' : '#374151'}; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;">
+                            ${escapeHtml(acc.name || 'Account ' + (idx + 1))} (CVV: ${acc.cvv ? '***' : 'none'})
+                        </span>
+                    </div>
+                    <button type="button" class="tb-del-acc" data-idx="${idx}" style="border:none; background:transparent; color:#ef4444; font-weight:bold; cursor:pointer; font-size:12px;" title="Delete">✕</button>
+                `;
+
+                // Select account
+                item.querySelector('input[type="radio"]')?.addEventListener('change', () => {
+                    GM_setValue('activeAccountIndex', String(idx));
+                    console.log(`Target Bot: Active account switched to: ${acc.name}`);
+                    renderAccounts();
+                });
+
+                // Delete account
+                item.querySelector('.tb-del-acc')?.addEventListener('click', () => {
+                    profiles.splice(idx, 1);
+                    GM_setValue('accountProfiles', JSON.stringify(profiles));
+                    if (activeIdx >= profiles.length) {
+                        GM_setValue('activeAccountIndex', String(Math.max(0, profiles.length - 1)));
+                    }
+                    renderAccounts();
+                });
+
+                listEl.appendChild(item);
+            });
+        };
+
+        // Add Account Button
+        $('#bot-add-acc-btn')?.addEventListener('click', () => {
+            const name = $('#bot-new-acc-name')?.value.trim();
+            const cvv = $('#bot-new-acc-cvv')?.value.trim();
+            if (!name) {
+                console.log('Target Bot: Enter an account name or email.');
+                return;
+            }
+            const profilesRaw = GM_getValue('accountProfiles', '[]');
+            let profiles = [];
+            try { profiles = JSON.parse(profilesRaw); } catch (e) { profiles = []; }
+
+            profiles.push({ name, cvv });
+            GM_setValue('accountProfiles', JSON.stringify(profiles));
+            $('#bot-new-acc-name').value = '';
+            $('#bot-new-acc-cvv').value = '';
+            renderAccounts();
+            console.log(`Target Bot: Added account "${name}".`);
+        });
+
+        renderAccounts();
+
         setInterval(updateMetricsUI, 500);
-
         updateStatusUI(getTabRunning());
+        updateGoalUI();
     }
 
     // =====================================================================
-    //  STARTUP — Smart page-ready detection  (P1.3)
+    //  STARTUP — Smart page-ready detection
     // =====================================================================
     function waitForPageReady(callback) {
         const t0 = Date.now();
@@ -2018,16 +2429,14 @@
                 $('button[data-test="shippingButton"]') ||
                 $('button[id^="addToCartButtonOrTextIdFor"]') ||
                 $('[data-test="outOfStockButton"]') ||
-                $('span.h-text-bold');
+                $('[data-test="product-card"]');
 
-            const isCart     = window.location.href.includes('target.com/cart');
+            const isSearch   = window.location.href.includes('target.com/s?') || window.location.href.includes('target.com/c/');
+            const isCart     = window.location.href.includes('target.com/cart') || window.location.href.includes('target.com/co-cart');
             const isCheckout = window.location.href.includes('/checkout') || window.location.href.includes('/co-');
             const timedOut   = Date.now() - t0 > CFG.STARTUP_MAX_WAIT_MS;
 
-            if (hasProduct || isCart || isCheckout || timedOut) {
-                if (timedOut && !hasProduct && !isCart && !isCheckout) {
-                    console.log('Target Bot: Page ready timeout — proceeding anyway.');
-                }
+            if (hasProduct || isSearch || isCart || isCheckout || timedOut) {
                 callback();
             } else {
                 setTimeout(check, CFG.STARTUP_POLL_MS);
@@ -2038,19 +2447,18 @@
     }
 
     // =====================================================================
-    //  INITIALIZATION — No fixed 1s delay, uses smart readiness check
+    //  INITIALIZATION
     // =====================================================================
     function init() {
         waitForPageReady(() => {
             createUI();
             if (getTabRunning()) {
-                console.log('Target Bot: Resuming from previous session...');
+                console.log('Target Bot: Resuming from active session...');
                 runBot();
             }
         });
     }
 
-    // Fire as soon as possible
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
         init();
     } else {
