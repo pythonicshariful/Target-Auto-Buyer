@@ -751,21 +751,40 @@
     //  POLL INTERVAL — respects drop-mode and adaptive timing
     // =====================================================================
     function getPollInterval() {
-        if (GM_getValue('dropMode', false)) return CFG.DROP_MODE_POLL_MS;
+        const randomEnabled = GM_getValue('randomDelayEnabled', true);
+        const lo = Math.max(100, parseInt(GM_getValue('minDelay', String(CFG.POLL_MIN_MS)), 10) || CFG.POLL_MIN_MS);
+        const hi = Math.max(lo,  parseInt(GM_getValue('maxDelay', String(CFG.POLL_MAX_MS)), 10) || CFG.POLL_MAX_MS);
 
+        // Check if Drop Mode or Adaptive Lead Time is active
+        const isDropMode = GM_getValue('dropMode', false);
         const dropTime = GM_getValue('dropTime', '');
+        let inDropWindow = false;
         if (dropTime) {
             const target = new Date(dropTime).getTime();
             const now    = Date.now();
             const diff   = (target - now) / 1000;
             if (diff > 0 && diff <= CFG.ADAPTIVE_LEAD_SEC) {
-                return CFG.DROP_MODE_POLL_MS;
+                inDropWindow = true;
             }
         }
 
-        const lo = Math.max(200, parseInt(GM_getValue('minDelay', String(CFG.POLL_MIN_MS)), 10) || CFG.POLL_MIN_MS);
-        const hi = Math.max(lo,  parseInt(GM_getValue('maxDelay', String(CFG.POLL_MAX_MS)), 10) || CFG.POLL_MAX_MS);
-        return Math.floor(Math.random() * (hi - lo + 1)) + lo;
+        if (isDropMode || inDropWindow) {
+            const dropBase = CFG.DROP_MODE_POLL_MS; // 250ms
+            if (randomEnabled) {
+                // Micro-jitter: +/- 45ms (205ms - 295ms) for anti-bot pattern evasion
+                const jitter = Math.floor(Math.random() * 90) - 45;
+                return Math.max(120, dropBase + jitter);
+            }
+            return dropBase;
+        }
+
+        if (!randomEnabled) {
+            return lo;
+        }
+
+        // Standard Random Timing between Min and Max delays
+        const interval = Math.floor(Math.random() * (hi - lo + 1)) + lo;
+        return interval;
     }
 
     // =====================================================================
@@ -1116,6 +1135,7 @@
         console.log(`Target Bot: Stock check #${pollNumber} — not in stock yet.`);
 
         const interval = getPollInterval();
+        console.log(`Target Bot: 🎲 Next stock check in ${(interval / 1000).toFixed(2)}s (${interval}ms random interval)...`);
         clearTimeout(state.pollTimeout);
         state.pollTimeout = setTimeout(() => pollStock(tcin), interval);
     }
@@ -1310,10 +1330,12 @@
             if (tcin) {
                 startDualModeMonitoring(tcin);
             } else {
+                const interval = getPollInterval();
+                console.log(`Target Bot: 🎲 Retrying in ${(interval / 1000).toFixed(2)}s (randomized)...`);
                 clearTimeout(state.pollTimeout);
                 state.pollTimeout = setTimeout(() => {
                     if (getTabRunning()) window.location.reload();
-                }, 2000);
+                }, interval);
             }
             return;
         }
@@ -1324,25 +1346,76 @@
             console.log('Target Bot: ATC button loading... Starting dual-mode monitoring.');
             startDualModeMonitoring(tcin);
         } else {
+            const interval = getPollInterval();
+            console.log(`Target Bot: 🎲 Button loading... Retrying in ${(interval / 1000).toFixed(2)}s (randomized)...`);
             clearTimeout(state.pollTimeout);
             state.pollTimeout = setTimeout(() => {
                 if (getTabRunning()) window.location.reload();
-            }, 2000);
+            }, interval);
         }
     }
 
     // =====================================================================
-    //  DAY 2: POKEMON CATEGORY / SEARCH AUTO-SCANNER
+    //  DAY 2: REDSKY SEARCH API & ZERO-RELOAD SCANNER
     // =====================================================================
+    function extractSearchTerm() {
+        try {
+            const params = new URLSearchParams(window.location.search);
+            let term = params.get('searchTerm') || params.get('keyword') || '';
+            if (!term) {
+                const m = window.location.pathname.match(/\/s\/([^/]+)/);
+                if (m) term = decodeURIComponent(m[1]);
+            }
+            term = (term || 'pokemon').trim().replace(/^pokimon$/i, 'pokemon');
+            return term || 'pokemon';
+        } catch (e) {
+            return 'pokemon';
+        }
+    }
+
+    async function querySearchApi(keyword, count = 24) {
+        const apiKey = '9f36aeafbe60771e321a7cc95a78140772ab3e96';
+        const cleanKw = (keyword || 'pokemon').trim().replace(/^pokimon$/i, 'pokemon');
+        const url = `https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2?key=${apiKey}&channel=WEB&count=${count}&default_purchasability_filter=true&include_sponsored=true&keyword=${encodeURIComponent(cleanKw)}&offset=0&page=%2Fs%2F${encodeURIComponent(cleanKw)}&platform=desktop&pricing_store_id=3991`;
+
+        try {
+            const resp = await fetch(url, {
+                headers: { 'Accept': 'application/json' },
+                cache: 'no-store',
+            });
+
+            if (resp.ok) {
+                const data = await resp.json();
+                const rawProducts = data?.data?.search?.products || [];
+                return rawProducts.map(p => {
+                    const tcin = p.tcin;
+                    const title = p.item?.product_description?.title || p.title || '';
+                    const buyUrl = p.item?.enrichment?.buy_url || (tcin ? `https://www.target.com/p/-/-/A-${tcin}` : null);
+                    const price = p.price?.current_retail || parseFloat((p.price?.formatted_current_price || '').replace(/[^0-9.]/g, '')) || null;
+                    const shipStatus = p.fulfillment?.shipping_options?.availability_status;
+                    const storeStatus = p.fulfillment?.store_options?.availability_status;
+                    const isAvailable = shipStatus === 'IN_STOCK' || storeStatus === 'IN_STOCK' || Boolean(p.fulfillment?.shipping_options?.services?.length);
+                    return { tcin, title, buyUrl, price, isAvailable };
+                });
+            }
+        } catch (e) {
+            // Fallback gracefully
+        }
+        return null;
+    }
+
     async function handleSearchPage() {
         if (!getTabRunning()) return;
-        console.log('Target Bot: 🔍 Scanning Search / Category page for in-stock Pokemon items...');
 
         const autoScanEnabled = GM_getValue('pokemonAutoScan', true);
         if (!autoScanEnabled) {
             console.log('Target Bot: Pokemon Auto-Scan is disabled in settings.');
             return;
         }
+
+        const searchTerm = extractSearchTerm();
+        metrics.pollCount++;
+        const pollNum = metrics.pollCount;
 
         const buyAny = GM_getValue('buyAnyPokemon', true);
         const keywordsStr = GM_getValue('pokemonKeywords', 'pokemon, pokimon, 30th, ascended, pitch black, booster, elite trainer, scarlet, celebration, tin, collection, pack, box, tcg');
@@ -1351,32 +1424,51 @@
         const blacklistStr = GM_getValue('pokemonBlacklist', 'shirt, socks, hoodie, costume, plush, binder, book, blanket');
         const blacklist = blacklistStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
 
-        // Find all product cards or product links on search page
-        let productCards = $$(
+        const maxPrice = getMaxPrice();
+        const skipPriceCheck = GM_getValue('skipPriceCheck', true);
+
+        console.log(`Target Bot: ⚡ API Search Check #${pollNum} for "${searchTerm}" (Zero-Reload)...`);
+        updateStatusUI(true, `⚡ API Polling #${pollNum}`);
+
+        // 1. FAST BACKGROUND API CHECK (Zero Page Reload)
+        const apiProducts = await querySearchApi(searchTerm, 24);
+
+        if (apiProducts && apiProducts.length > 0) {
+            for (const prod of apiProducts) {
+                if (!prod.title || !prod.buyUrl) continue;
+                const lowerTitle = prod.title.toLowerCase();
+
+                // Blacklist filter
+                if (blacklist.some(b => lowerTitle.includes(b))) continue;
+
+                // Whitelist or buy-any filter
+                const isMatch = buyAny || keywords.length === 0 || keywords.some(k => lowerTitle.includes(k));
+                if (!isMatch) continue;
+
+                // Price limit filter
+                if (!skipPriceCheck && maxPrice > 0 && prod.price !== null && prod.price > maxPrice) continue;
+
+                // Stock availability
+                if (prod.isAvailable) {
+                    console.log(`Target Bot: 🎯 IN-STOCK DROP FOUND via API: "${prod.title}" (TCIN ${prod.tcin}, $${prod.price || 'N/A'})!`);
+                    Notifier.notifyStock(prod.tcin, prod.price);
+                    updateStatusUI(true, '🚀 Opening Drop...');
+                    window.location.href = prod.buyUrl;
+                    return;
+                }
+            }
+            console.log(`Target Bot: API returned ${apiProducts.length} items — no in-stock matches yet.`);
+        }
+
+        // 2. DOM FALLBACK CHECK (Checks visible cards without reloading)
+        const productCards = $$(
             '[data-test="product-card"], ' +
             '[data-test="@web/site-top-of-funnel/ProductCardWrapper"], ' +
             '[data-test="@web/ProductCard/body"], ' +
             'div[data-test="product-grid"] > div, ' +
             'div[data-test="product-grid"] li, ' +
-            'div[data-component="ProductCard"], ' +
-            'div[class*="styles__ProductCardWrapper"], ' +
-            'div[class*="ProductCard"]'
+            'div[data-component="ProductCard"]'
         );
-
-        if (productCards.length === 0) {
-            const links = $$('a[href*="/p/"]');
-            const seenHref = new Set();
-            productCards = links.filter(a => {
-                const href = a.href.split('?')[0];
-                if (seenHref.has(href)) return false;
-                seenHref.add(href);
-                return a.textContent && a.textContent.trim().length > 3;
-            }).map(a => a.closest('div') || a);
-        }
-
-        console.log(`Target Bot: Found ${productCards.length} product elements on search page.`);
-
-        let matchFound = null;
 
         for (const card of productCards) {
             const titleEl = $('[data-test="product-title"]', card) || $('a[href*="/p/"]', card) || $('h2', card) || $('h3', card);
@@ -1385,26 +1477,24 @@
             const link = linkEl?.href;
 
             if (!title || !link || !link.includes('/p/')) continue;
-
-            // Check blacklist
             if (blacklist.some(b => title.includes(b))) continue;
 
-            // Check whitelist or buy-any mode
             const isMatch = buyAny || keywords.length === 0 || keywords.some(k => title.includes(k));
             if (!isMatch) continue;
 
-            // Check if card has active ATC button right on search page
+            // Direct Add-to-Cart button on search card
             const cardAtc = $('button[data-test="shippingButton"]:not([disabled])', card) ||
                             $('button[id*="addToCart"]:not([disabled])', card) ||
                             xpath(".//button[not(@disabled) and (contains(., 'Add to cart') or contains(., 'Ship it'))]", card);
 
             if (cardAtc && isVisible(cardAtc) && !isDisabled(cardAtc)) {
-                console.log(`Target Bot: 🎯 In-stock Pokemon card with direct ATC found: "${title}"`);
-                matchFound = { title, link, btn: cardAtc };
-                break;
+                console.log(`Target Bot: 🎯 In-stock card with direct ATC found in DOM: "${title}"`);
+                cardAtc.click();
+                watchForCartConfirmation();
+                return;
             }
 
-            // Check online stock status (ignore store pickup out-of-stock messages)
+            // Online stock check
             const text = (card.textContent || '').toLowerCase();
             const isOnlineOos =
                 text.includes('sold out online') ||
@@ -1415,36 +1505,23 @@
                 Boolean(card.querySelector('[data-test="soldOutButton"]'));
 
             if (!isOnlineOos) {
-                console.log(`Target Bot: 🎯 In-stock Pokemon item found: "${title}"`);
-                matchFound = { title, link, btn: null };
-                break;
-            }
-        }
-
-        if (matchFound) {
-            if (matchFound.btn) {
-                console.log(`Target Bot: 🛒 Clicking Add to Cart directly on search page for: ${matchFound.title}`);
-                matchFound.btn.click();
-                watchForCartConfirmation();
+                console.log(`Target Bot: 🎯 In-stock item found in DOM: "${title}" → Navigating...`);
+                updateStatusUI(true, '🚀 Opening Product...');
+                window.location.href = link;
                 return;
             }
-
-            console.log(`Target Bot: 🚀 Navigating to matched product page: ${matchFound.link}`);
-            updateStatusUI(true, '🚀 Opening Product...');
-            window.location.href = matchFound.link;
-            return;
         }
 
-        console.log(`Target Bot: Scanned ${productCards.length} products. No matching in-stock items found in current view. Scrolling / Re-checking in 8s...`);
-        updateStatusUI(true, '🔍 Scanning search results...');
-        window.scrollBy({ top: 500, behavior: 'smooth' });
-
+        // 3. SCHEDULE NEXT BACKGROUND POLL (No Page Reload, Randomized Timing)
+        const interval = getPollInterval();
+        console.log(`Target Bot: 🎲 Next background API search in ${(interval / 1000).toFixed(2)}s (${interval}ms random interval)...`);
+        updateStatusUI(true, `⚡ Poll in ${(interval / 1000).toFixed(1)}s`);
         clearTimeout(state.searchPollTimeout);
         state.searchPollTimeout = setTimeout(() => {
             if (getTabRunning()) {
-                window.location.reload();
+                handleSearchPage();
             }
-        }, 8000);
+        }, interval);
     }
 
     // =====================================================================
@@ -2061,6 +2138,22 @@
                             <div id="bot-drop-mode" class="tb-switch ${GM_getValue('dropMode', false) ? 'active' : ''}"></div>
                         </div>
 
+                        <div class="tb-toggle-row">
+                            <span class="tb-toggle-label">🎲 Randomized Delay Interval</span>
+                            <div id="bot-random-delay" class="tb-switch ${GM_getValue('randomDelayEnabled', true) ? 'active' : ''}"></div>
+                        </div>
+
+                        <div class="tb-grid-2">
+                            <div class="tb-field">
+                                <label class="tb-label" for="bot-min-delay">Random Delay Min (ms)</label>
+                                <input class="tb-input" type="number" id="bot-min-delay" min="100" max="10000" step="50" value="${GM_getValue('minDelay', '500')}" />
+                            </div>
+                            <div class="tb-field">
+                                <label class="tb-label" for="bot-max-delay">Random Delay Max (ms)</label>
+                                <input class="tb-input" type="number" id="bot-max-delay" min="200" max="30000" step="50" value="${GM_getValue('maxDelay', '1500')}" />
+                            </div>
+                        </div>
+
                         <div class="tb-status-row">
                             <span class="tb-label" style="margin: 0;">Goal Progress</span>
                             <div style="display:flex; align-items:center; gap:6px;">
@@ -2274,6 +2367,8 @@
         const save = () => {
             GM_setValue('qty',                 $('#bot-qty')?.value || '1');
             GM_setValue('maxPrice',            $('#bot-max-price')?.value || '0');
+            GM_setValue('minDelay',            $('#bot-min-delay')?.value || '500');
+            GM_setValue('maxDelay',            $('#bot-max-delay')?.value || '1500');
             GM_setValue('cvv',                 $('#bot-cvv')?.value || '');
             GM_setValue('dropTime',            $('#bot-drop-time')?.value || '');
             GM_setValue('targetGoal',          $('#bot-target-goal')?.value || '1000');
@@ -2289,7 +2384,7 @@
         };
 
         [
-            'bot-qty', 'bot-max-price', 'bot-cvv', 'bot-drop-time', 'bot-target-goal',
+            'bot-qty', 'bot-max-price', 'bot-min-delay', 'bot-max-delay', 'bot-cvv', 'bot-drop-time', 'bot-target-goal',
             'bot-pokemon-keywords', 'bot-pokemon-blacklist', 'bot-multi-urls',
             'bot-account-profiles', 'bot-active-account',
             'bot-discord-webhook', 'bot-telegram-token', 'bot-telegram-chat-id'
@@ -2312,6 +2407,7 @@
 
         setupToggle('bot-skip-price', 'skipPriceCheck');
         setupToggle('bot-drop-mode', 'dropMode');
+        setupToggle('bot-random-delay', 'randomDelayEnabled');
         setupToggle('bot-pokemon-autoscan', 'pokemonAutoScan');
         setupToggle('bot-buy-any-pokemon', 'buyAnyPokemon');
         setupToggle('bot-repeat-loop', 'repeatPurchaseLoop');

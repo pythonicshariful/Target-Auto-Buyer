@@ -24,7 +24,9 @@ An ultra-fast browser userscript for monitoring Target product availability, aut
    - Added automatic fulfillment selection for items requiring "Shipping" radio button selection prior to ATC.
 
 ### 🔍 Pokemon Drop & Category Auto-Monitor (Day 2)
-- **Automatic Category & Search Scanner:** Run the bot on `https://www.target.com/s?searchTerm=pokemon` — it continuously monitors search results for drops matching your whitelist keywords (e.g. `30th Anniversary`, `Ascended Heroes`, `Pitch Black`, `Booster Bundle`, `Elite Trainer Box`).
+- **⚡ Zero-Reload Redsky Search API Scanner:** Instead of constantly reloading the search page, the bot polls Target's background **Redsky Search API (`plp_search_v2`)** asynchronously without refreshing. The page stays completely static and never flashes or triggers anti-bot walls.
+- **🎲 Randomized Check Intervals & Anti-Fingerprinting:** Automatically polls at randomized intervals between configurable Min and Max limits (e.g., 500ms – 1500ms or 1000ms – 3000ms) with micro-jitter (±45ms) in Drop Mode to defeat Akamai/PerimeterX bot detection and rate-limiting.
+- **Instant Drop Trigger:** The millisecond a Pokemon product matching your keywords comes in stock, the bot detects it via the API and immediately navigates directly to checkout!
 - **Blacklist Filter:** Ignores non-card products like t-shirts, plushies, binders, and costumes.
 - **Multi-URL Monitoring:** Paste multiple Target product links or TCINs into the bot; it monitors availability across all of them.
 - **Repeat Purchase Loop (Auto-Rebuy):** Set a purchase goal (e.g., 10, 50, 1000 pcs). Once an order is confirmed, the bot automatically loops back to repurchase until your target goal is met!
@@ -75,7 +77,7 @@ Install [Tampermonkey](https://www.tampermonkey.net/) on Chrome, Edge, Brave, or
 3. Keep your card CVV handy.
 
 ### 2. Configure the HUD Tabs
-- **⚡ Drop Tab:** Set Quantity (e.g., 5 or 10), Max Price ($0 = any), CVV, and Drop Mode.
+- **⚡ Drop Tab:** Set Quantity (e.g., 5 or 10), Max Price ($0 = any), CVV, Drop Mode, and **Random Delay Min / Max (ms)** (e.g., 500ms – 1500ms) with randomized anti-fingerprinting intervals.
 - **🔍 Pokemon Tab:** Enable "Auto-Scan Pokemon Categories", set your Target Goal (e.g., 1000 pcs), and configure Whitelist/Blacklist keywords.
 - **👥 Accounts Tab:** Add additional account profiles and manage multi-tab synchronization.
 - **🔔 Alerts Tab:** Enter your Discord Webhook URL or Telegram Bot Token/Chat ID.
