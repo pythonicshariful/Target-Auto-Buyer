@@ -2450,6 +2450,12 @@
     //  INITIALIZATION
     // =====================================================================
     function init() {
+        // 1. Create the floating HUD immediately so it is visible on ANY page (including homepage)
+        if (document.body) {
+            createUI();
+        }
+
+        // 2. Wait for specific page elements before starting automatic bot operations
         waitForPageReady(() => {
             createUI();
             if (getTabRunning()) {
