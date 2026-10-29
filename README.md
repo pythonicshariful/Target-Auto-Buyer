@@ -1,87 +1,139 @@
-# Target Auto Buyer ⚡ v4.0 — Pokemon Drop & Auto-Monitor Edition
+# Target Auto Buyer ⚡ v4.2 — Parallel Multi-Tab & Pokemon Drop Edition
 
 [![Tampermonkey](https://img.shields.io/badge/Tampermonkey-Supported-green.svg)](https://www.tampermonkey.net/)
 [![Platform](https://img.shields.io/badge/Platform-Target.com-CC0000.svg)](https://www.target.com)
-[![Version](https://img.shields.io/badge/Version-4.0-blue.svg)](#features)
+[![Version](https://img.shields.io/badge/Version-4.2-blue.svg)](#features)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](#license)
 
-An ultra-fast browser userscript for monitoring Target product availability, auto-scanning Pokemon categories & drops, handling multi-quantity orders, and completing checkout with Discord, Telegram, and synthesized audio alerts.
+An ultra-fast browser userscript for monitoring Target product availability, auto-scanning Pokemon categories & drops, executing **parallel multi-tab purchases**, handling multi-quantity orders, and completing checkout with Discord, Telegram, and synthesized audio alerts.
 
 ---
 
-## ⚡ Version 4.0 — What's New
+## ⚡ What's New in Version 4.2 — Parallel Multi-Tab Buying Engine
 
-### 🐛 Critical Bug Fixes (Day 1)
-1. **Quantity Stays at 1 Bug — Fixed:**
-   - Introduced a **3-Tier Quantity Controller** covering:
-     - **Tier 1 (PDP):** Supports native `<select>`, Target custom dropdowns (`[role="listbox"]`), and numeric steppers.
-     - **Tier 2 (Cart Drawer):** Adjusts quantity in the slide-out drawer immediately upon ATC.
-     - **Tier 3 (Cart Page `/cart`):** For 3rd-party marketplace Pokemon items (where no quantity selector exists on the product page), the bot routes through `/cart` and updates `select[data-test="cartItem-qty"]` or steppers up to the seller's maximum allowed purchase limit before heading to checkout!
-2. **High-Priced Items ($800+) Failing — Fixed:**
-   - Corrected `isOutOfStock()` false positives caused by Target's "Out of stock at store pickup" badges on items that are fully in-stock for shipping.
-   - Smart price parser now extracts the primary price cleanly, avoiding corrupted values from price ranges (e.g. `$299.99 – $849.99`).
-   - Added a **"Skip Price Check for Marketplace"** toggle so high-value bundles are never blocked.
-   - Added automatic fulfillment selection for items requiring "Shipping" radio button selection prior to ATC.
+### 🪟 1. Parallel Multi-Tab Auto-Buyer & Coordinator
+- **Search Page Coordinator:** When started on any Target search page (`https://www.target.com/s?searchTerm=pokemon+card`) or category page, the tab operates as an intelligent **Coordinator**. It remains on the search page, continuously managing the product queue and worker tabs.
+- **Auto-Extract Matches into Multi-URL Box:** On every scan, the bot scans rendered DOM cards and Target's Redsky API, filters items with your whitelist/blacklist, and automatically inputs matching URLs into the **Multi-URL Monitor box (`#bot-multi-urls`)**.
+- **Concurrent Tabs (2–3 Tabs Simultaneously):** Configurable in the HUD under **Parallel Product Tabs** (default: `2`, configurable up to `5`). The bot opens multiple product tabs concurrently to monitor, add to cart, and process checkout in parallel.
+- **Dynamic Slot Replenishment on Reaching Checkout:** As soon as an opened product tab adds an item to cart and reaches the **checkout page** (`/checkout` or `/co-`), it broadcasts `WORKER_CHECKOUT_REACHED` via `BroadcastChannel`. The coordinator immediately frees up that slot and opens the **next product tab from the queue** without waiting for order completion!
+- **Auto-Close Finished Tabs:**
+  - **Order Confirmed:** Records purchased units toward the Total Purchase Goal, alerts Discord/Telegram, and closes the worker tab after 4 seconds.
+  - **Out of Stock (OOS):** Broadcasts `WORKER_OOS` to open the next item immediately and closes the tab after 1.5 seconds.
+  - **Cart Errors / Sold Out:** Notifies coordinator to launch the next product and closes the tab after 1.5 seconds.
+- **Live Queue & Tab Status Display:** The HUD features a real-time badge: `Queue: X | Open: Y` showing queued items and currently running worker tabs.
 
-### 🔍 Pokemon Drop & Category Auto-Monitor (Day 2)
-- **⚡ Zero-Reload Redsky Search API Scanner:** Instead of constantly reloading the search page, the bot polls Target's background **Redsky Search API (`plp_search_v2`)** asynchronously without refreshing. The page stays completely static and never flashes or triggers anti-bot walls.
-- **🎲 Randomized Check Intervals & Anti-Fingerprinting:** Automatically polls at randomized intervals between configurable Min and Max limits (e.g., 500ms – 1500ms or 1000ms – 3000ms) with micro-jitter (±45ms) in Drop Mode to defeat Akamai/PerimeterX bot detection and rate-limiting.
-- **Instant Drop Trigger:** The millisecond a Pokemon product matching your keywords comes in stock, the bot detects it via the API and immediately navigates directly to checkout!
-- **Blacklist Filter:** Ignores non-card products like t-shirts, plushies, binders, and costumes.
-- **Multi-URL Monitoring:** Paste multiple Target product links or TCINs into the bot; it monitors availability across all of them.
-- **Repeat Purchase Loop (Auto-Rebuy):** Set a purchase goal (e.g., 10, 50, 1000 pcs). Once an order is confirmed, the bot automatically loops back to repurchase until your target goal is met!
+### 🛡️ 2. Stability & Anti-Bot Enhancements
+- **XPath Verification Fix:** Replaced fragile string-escaped XPath evaluation with safe DOM text queries, eliminating syntax crashes on Cloudflare/Target verification prompts.
+- **Redsky API Parsing Guard:** Added bulletproof `.trim() || '{}'` payload validation on Redsky `plp_search_v2` endpoints to prevent unexpected end-of-JSON errors.
+- **Search Term Normalization:** Global regex normalization handles queries like `pokimon card` by mapping them directly to official Pokemon product queries.
+- **Drawer Fulfillment Selector:** Scoped fulfillment drawer button selectors to avoid re-clicking Add to Cart inside slide-out drawers.
 
-### 👥 Multi-Account & Multi-Tab Orchestration (Day 3)
-- **Multi-Account Profile Manager:** Store multiple account profiles with unique CVVs. The bot automatically inputs the correct CVV for each account profile during checkout.
-- **Cross-Tab Synchronization (`BroadcastChannel`):** Open multiple browser tabs across different accounts; tabs communicate to sync total purchased count, claim separate items, and coordinate global start/stop commands.
-- **Proxy Configuration Guide:** In-HUD instructions for setting up US residential proxies with extensions like Proxy SwitchyOmega.
+---
+
+## 🔄 Architecture & Flow
+
+```
++-------------------------------------------------------------------+
+|               COORDINATOR TAB (Search / Category Page)            |
+|  - Scans DOM Cards & Redsky API                                   |
+|  - Populates Multi-URL Monitor & Queue (In-stock first)           |
+|  - Manages Parallel Limits (2-3 tabs)                             |
+|  - Listens for Cross-Tab BroadcastChannel Events                  |
++---------------------------------+---------------------------------+
+                                  |
+            +---------------------+---------------------+
+            |                     |                     |
+     Opens Tab 1           Opens Tab 2           Opens Tab 3
+            |                     |                     |
+            v                     v                     v
+     [Worker Tab 1]        [Worker Tab 2]        [Worker Tab 3]
+     - PDP Check           - PDP Check           - PDP Check
+     - Add to Cart         - Out of Stock?       - Add to Cart
+            |                     |                     |
+            |              Sends WORKER_OOS             |
+            |              Closes in 1.5s               |
+            |                     |                     |
+     Reaches /checkout            |              Reaches /checkout
+            |                     |                     |
+     Sends WORKER_CHECKOUT_REACHED|              Sends WORKER_CHECKOUT_REACHED
+            |                     |                     |
+            +-----------> Coordinator Opens Next Product <---------+
+            |                                                      |
+     Auto-fills CVV                                         Auto-fills CVV
+     Clicks Place Order                                     Clicks Place Order
+     Order Confirmed!                                       Order Confirmed!
+     Sends ORDER_COMPLETED                                  Sends ORDER_COMPLETED
+     Closes in 4s                                           Closes in 4s
+```
 
 ---
 
 ## 🚀 Key Features
 
 ### 🛒 1. Intelligent Add-to-Cart & Quantity Controller
-- Automatically adjusts quantity on PDP, in the cart drawer, or on `/cart`.
+- Automatically adjusts quantity on PDP, in the fulfillment drawer, or on `/cart`.
 - If an item has a purchase limit (e.g. limit 2 per order), the bot selects the maximum allowed and uses the **Repeat Purchase Loop** to reach your target goal.
-- Auto-declines warranty & protection plan modals.
+- Auto-declines warranty and protection plan modals.
 
 ### 💳 2. Rapid Single-Pass Checkout
-- Fast 200ms evaluation loop on `/checkout`.
-- Auto-fills CVV based on the active account profile.
+- Fast evaluation loop on `/checkout`.
+- Auto-fills CVV based on active account profile.
 - Submits Place Order once and monitors confirmation status.
 
 ### 🔔 3. Multi-Channel Alerts & Audio Chimes
-- **Discord Webhooks:** Rich embeds with product title, TCIN, price, quantity, and goal progress.
-- **Telegram Bot API:** Instant push notifications to Telegram chats or channels.
-- **Web Audio Chimes:** Synthesized audio for Stock Detected, Cart Added, and Order Confirmed fanfare.
+- **Discord Webhooks:** Rich visual embeds with product title, TCIN, price, quantity, and goal progress.
+- **Telegram Bot API:** Instant push alerts to Telegram chats or channels with copyable code tags.
+- **Web Audio Chimes:** Built-in acoustic synthesizer for Stock Detected, Cart Added, and Order Confirmed fanfare (zero external audio files needed).
 
 ---
 
-## 🛠️ Installation
+## 🛠️ Installation & Setup
 
 ### Step 1: Install a Userscript Manager
-Install [Tampermonkey](https://www.tampermonkey.net/) on Chrome, Edge, Brave, or Firefox.
+Install [Tampermonkey](https://www.tampermonkey.net/) on Chrome, Brave, Edge, or Firefox.
 
-### Step 2: Install Target Auto Buyer v4.0
-1. Open Tampermonkey Dashboard -> Click **Add a new script** (`+`).
-2. Replace default code with [`Target Auto Buyer.js`](./Target%20Auto%20Buyer.js).
+### Step 2: Install Target Auto Buyer v4.2
+1. Open the Tampermonkey Dashboard → Click **Add a new script** (`+`).
+2. Replace default contents with [`Target Auto Buyer.js`](./Target%20Auto%20Buyer.js).
 3. Press **Ctrl + S** (or **Cmd + S**) to save.
+
+### Step 3: Enable Browser Pop-ups (CRITICAL for Multi-Tab)
+Because the bot opens 2–3 tabs concurrently to check out multiple items in parallel:
+1. Navigate to `https://www.target.com/s?searchTerm=pokemon+card`
+2. Click the site settings icon on the left of the address bar (or the pop-up blocker icon on the right).
+3. Set **Pop-ups and redirects** to **Allow**.
 
 ---
 
-## 📖 How to Use
+## 📖 Recommended Settings for Pokemon Drops
 
-### 1. Pre-Drop Setup
-1. Log in to your Target account.
-2. Save your default shipping address and payment card in your Target Wallet.
-3. Keep your card CVV handy.
+Open the floating HUD by visiting Target.com and configure the **🔍 Pokemon Tab**:
 
-### 2. Configure the HUD Tabs
-- **⚡ Drop Tab:** Set Quantity (e.g., 5 or 10), Max Price ($0 = any), CVV, Drop Mode, and **Random Delay Min / Max (ms)** (e.g., 500ms – 1500ms) with randomized anti-fingerprinting intervals.
-- **🔍 Pokemon Tab:** Enable "Auto-Scan Pokemon Categories", set your Target Goal (e.g., 1000 pcs), and configure Whitelist/Blacklist keywords.
-- **👥 Accounts Tab:** Add additional account profiles and manage multi-tab synchronization.
-- **🔔 Alerts Tab:** Enter your Discord Webhook URL or Telegram Bot Token/Chat ID.
+| Setting | Recommended Value | Description |
+|---|---|---|
+| **Auto-Scan Pokemon Categories** | `ON` | Automatically scans search and category pages. |
+| **Buy ANY In-Stock Pokemon Card** | `OFF` | Set to `OFF` so it uses the Whitelist and ignores non-Pokemon items (e.g. Mario, Monopoly). |
+| **Repeat Purchase Loop** | `ON` | Continues buying across items until Total Goal is reached. |
+| **Total Purchase Goal** | `100` – `1000` | Target total units across all orders. |
+| **Parallel Product Tabs** | `2` or `3` | Number of product tabs to process simultaneously. |
+| **Whitelist Keywords** | `pokemon, pokimon, booster, elite trainer, scarlet, celebration, tin, collection, pack, box, tcg` | Comma-separated allowed product keywords. |
+| **Blacklist Keywords** | `shirt, socks, hoodie, costume, plush, binder, book, blanket` | Keywords to strictly skip. |
+| **Multi-URL Monitor** | Auto-populated | Automatically filled with matched URLs; can also paste custom URLs. |
 
-### 3. Start Monitoring
-- Navigate to any Target Pokemon product page or search page (`https://www.target.com/s?searchTerm=pokemon`).
-- Click **▶ Start Bot**.
+---
+
+## 🧪 Safe Dry-Run Testing
+
+1. Navigate to an in-stock, inexpensive everyday item (e.g., notebook, paper clips).
+2. Set **Quantity** to `1`.
+3. In the **⚡ Drop Tab**, set **Max Price** to `$0.01` (below item price).
+4. Click **▶ Start Bot**.
+5. Verify:
+   - The bot detects the price and logs: `Price $X > max $0.01. Monitoring for price drop...`
+   - Test Discord, Telegram, and Audio alerts using the test buttons in the **🔔 Alerts Tab**.
+6. When satisfied, set **Max Price** back to `$0` (any price) or your target budget and start your drop session!
+
+---
+
+## 📄 License
+MIT License. For educational and automation workflow research. Always adhere to Target.com Terms of Service.

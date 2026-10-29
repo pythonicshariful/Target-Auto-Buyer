@@ -1,8 +1,8 @@
-// ==UserScript==
+﻿// ==UserScript==
 // @name         Target Auto Buyer
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  Target Auto Buyer ⚡ v4.0 — Pokemon Drop & Auto-Monitor Edition with Multi-URL, Multi-Account, Cart Qty Fix & Discord/Telegram alerts
+// @version      4.2
+// @description  Target Auto Buyer ⚡ v4.1 — Auto-Populate Multi-URL Box with Matching Search Products, Zero-Reload Scanner & Continuous Auto-Buy Loop
 // @author       Pythonic Shariful
 // @match        https://www.target.com/*
 // @grant        GM_setValue
@@ -23,8 +23,8 @@
     // =====================================================================
     const CFG = {
         // Stock polling
-        POLL_MIN_MS:            500,     // Normal-mode minimum poll interval
-        POLL_MAX_MS:           1500,     // Normal-mode maximum poll interval
+        POLL_MIN_MS:           1200,     // Normal-mode safe minimum poll interval (avoids PerimeterX triggers)
+        POLL_MAX_MS:           2400,     // Normal-mode safe maximum poll interval
         DROP_MODE_POLL_MS:      250,     // Ultra-aggressive drop-mode interval
         ADAPTIVE_LEAD_SEC:       30,     // Seconds before drop time to switch to aggressive
 
@@ -46,7 +46,8 @@
         SESSION_CHECK_URL: 'https://www.target.com/co-cart',
 
         // Multi-Tab & Broadcast
-        CHANNEL_NAME: 'target_auto_buyer_channel_v4',
+        CHANNEL_NAME:        'target_auto_buyer_channel_v4',
+        PARALLEL_TABS_DEFAULT: 2,
     };
 
     // =====================================================================
@@ -144,6 +145,45 @@
                     console.log(`Target Bot [Multi-Tab]: Notice: TCIN ${data.tcin} is also being processed by ${data.tabId}`);
                 }
                 break;
+            case 'WORKER_CHECKOUT_REACHED':
+                if (GM_getValue('coordinatorTabId', '') === tabId) {
+                    console.log(`Target Bot [Coordinator]: 🛒 Worker reached checkout (${data.url || data.tcin || data.tabId}). Freeing slot & opening next product...`);
+                    let activeWorkers = [];
+                    try { activeWorkers = JSON.parse(GM_getValue('activeWorkerList', '[]')); } catch (e) {}
+                    let matched = false;
+                    for (const w of activeWorkers) {
+                        if (!w.freed && (w.tabId === data.tabId || (data.tcin && w.url && w.url.includes(data.tcin)))) {
+                            w.freed = true;
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched && activeWorkers.length > 0) {
+                        for (const w of activeWorkers) {
+                            if (!w.freed) { w.freed = true; break; }
+                        }
+                    }
+                    activeWorkers = activeWorkers.filter(w => !w.freed);
+                    GM_setValue('activeWorkerList', JSON.stringify(activeWorkers));
+                    openNextWorkerTabs();
+                }
+                break;
+            case 'WORKER_ORDER_DONE':
+            case 'WORKER_OOS':
+            case 'WORKER_ERROR':
+                if (GM_getValue('coordinatorTabId', '') === tabId) {
+                    console.log(`Target Bot [Coordinator]: Worker finished (${data.type}: ${data.tcin || data.url || data.tabId}). Freeing slot & opening next product...`);
+                    let activeWorkers = [];
+                    try { activeWorkers = JSON.parse(GM_getValue('activeWorkerList', '[]')); } catch (e) {}
+                    activeWorkers = activeWorkers.filter(w => {
+                        if (w.tabId === data.tabId) return false;
+                        if (data.tcin && w.url && w.url.includes(data.tcin)) return false;
+                        return true;
+                    });
+                    GM_setValue('activeWorkerList', JSON.stringify(activeWorkers));
+                    openNextWorkerTabs();
+                }
+                break
         }
     }
 
@@ -178,6 +218,7 @@
         pollTimeout:          null,
         cartTimeout:          null,
         searchPollTimeout:    null,
+        challengeTimeout:     null,
         placeOrderError:      null,
         domObserver:          null,
         sessionValid:         null,
@@ -190,6 +231,7 @@
         clearTimeout(state.pollTimeout);
         clearTimeout(state.cartTimeout);
         clearTimeout(state.searchPollTimeout);
+        clearTimeout(state.challengeTimeout);
         if (state.cartObserver) { state.cartObserver.disconnect(); state.cartObserver = null; }
         if (state.checkoutLoop) { clearInterval(state.checkoutLoop); state.checkoutLoop = null; }
         if (state.domObserver)  { state.domObserver.disconnect(); state.domObserver = null; }
@@ -203,14 +245,29 @@
     //  TAB-SCOPED RUNNING STATE  (sessionStorage so each tab is independent)
     // =====================================================================
     function getTabRunning() {
-        try { return window.sessionStorage.getItem('targetBotRunning') === '1'; }
-        catch (e) { return false; }
+        try {
+            if (window.sessionStorage.getItem('targetBotRunning') === '1') return true;
+            const isWorker = window.location.href.includes('bot_worker=1') || window.sessionStorage.getItem('target_bot_worker') === 'true';
+            if (isWorker && GM_getValue('botGlobalRunning', '0') === '1') {
+                window.sessionStorage.setItem('targetBotRunning', '1');
+                return true;
+            }
+            return false;
+        } catch (e) { return false; }
     }
 
     function setTabRunning(running) {
         try {
-            if (running) window.sessionStorage.setItem('targetBotRunning', '1');
-            else         window.sessionStorage.removeItem('targetBotRunning');
+            if (running) {
+                window.sessionStorage.setItem('targetBotRunning', '1');
+                GM_setValue('botGlobalRunning', '1');
+            } else {
+                window.sessionStorage.removeItem('targetBotRunning');
+                const isWorker = window.location.href.includes('bot_worker=1') || window.sessionStorage.getItem('target_bot_worker') === 'true';
+                if (!isWorker) {
+                    GM_setValue('botGlobalRunning', '0');
+                }
+            }
         } catch (e) { /* ignore */ }
     }
 
@@ -1067,24 +1124,15 @@
 
         for (let attempt = 1; attempt <= CFG.API_MAX_RETRIES; attempt++) {
             try {
-                const resp = await fetch(url, {
+                const res = await httpRequest({
+                    method: 'GET',
+                    url: url,
                     headers: { 'Accept': 'application/json' },
-                    cache: 'no-store',
                 });
-
-                if (resp.ok) {
-                    const data = await resp.json();
-                    const status = data?.data?.product?.fulfillment?.shipping_options?.availability_status;
-                    // Also check partner fulfillment or general availability
-                    const storeStatus = data?.data?.product?.fulfillment?.store_options?.availability_status;
-                    return status === 'IN_STOCK' || storeStatus === 'IN_STOCK';
-                }
-
-                if (resp.status >= 500 && attempt < CFG.API_MAX_RETRIES) {
-                    await sleep(CFG.API_RETRY_BASE_MS * attempt);
-                    continue;
-                }
-                return false;
+                const data = JSON.parse(res.responseText || '{}');
+                const status = data?.data?.product?.fulfillment?.shipping_options?.availability_status;
+                const storeStatus = data?.data?.product?.fulfillment?.store_options?.availability_status;
+                return status === 'IN_STOCK' || storeStatus === 'IN_STOCK';
             } catch (e) {
                 if (attempt < CFG.API_MAX_RETRIES) {
                     await sleep(CFG.API_RETRY_BASE_MS * attempt);
@@ -1223,6 +1271,17 @@
                 declineBtn.click();
             }
 
+            // If Target opens fulfillment options drawer/modal (e.g. "Choose how to get it" -> "Ship it")
+            const drawerShipBtn = $('button[data-test="fulfillment-cell-shipping"]:not([disabled])') ||
+                                  $('button[data-test="shipItButton"]:not([disabled])') ||
+                                  $('button[data-test="orderPickupButton"]:not([disabled])') ||
+                                  $('button[data-test="esp-modal-decline"]:not([disabled])') ||
+                                  xpath("//button[not(@disabled) and not(ancestor::*[@id='target-bot-ui']) and (contains(., 'Ship it') or contains(., 'Ship to') or contains(., 'Order Pickup') or contains(., 'Pick it up'))]");
+            if (drawerShipBtn && isVisible(drawerShipBtn)) {
+                console.log('Target Bot: Selecting delivery/shipping option in drawer...');
+                drawerShipBtn.click();
+            }
+
             // Check if cart drawer or redirect has occurred
             const viewCartBtn =
                 xpath("//a[contains(text(),'View cart')]")  ||
@@ -1294,7 +1353,13 @@
     // =====================================================================
     async function handleProductPage() {
         if (!getTabRunning()) return;
-        console.log('Target Bot: Analyzing product page...');
+        if (handleBotChallenge()) return;
+
+        const isWorkerTab = window.location.href.includes('bot_worker=1') || window.sessionStorage.getItem('target_bot_worker') === 'true';
+        if (isWorkerTab) {
+            window.sessionStorage.setItem('target_bot_worker', 'true');
+        }
+        console.log(`Target Bot: Analyzing product page... ${isWorkerTab ? '[Worker Tab]' : ''}`);
 
         // 1. Check if an active ATC button is ready right now!
         const immediateBtn = findATCButton();
@@ -1325,9 +1390,33 @@
 
         // 2. Check if item is truly Out of Stock
         if (isOutOfStock()) {
-            console.log('Target Bot: ❌ Item appears Out of Stock. Starting monitoring...');
+            console.log('Target Bot: ❌ Item appears Out of Stock.');
+
+            if (isWorkerTab) {
+                console.log('Target Bot [Worker]: Product is Out of Stock. Notifying coordinator and closing worker tab in 1.5s...');
+                sendBroadcast('WORKER_OOS', { url: window.location.href, tcin: extractTcin() });
+                updateStatusUI(true, '⚠️ OOS (Closing...)');
+                setTimeout(() => {
+                    try { window.close(); } catch (e) {}
+                }, 1500);
+                return;
+            }
+
+            // Check if Multi-URL Monitor has other URLs to rotate to
+            const nextUrl = getNextMultiUrl();
+            if (nextUrl) {
+                console.log(`Target Bot: 🔄 Multi-URL Rotation: Rotating to next product in 1.5s: ${nextUrl}`);
+                updateStatusUI(true, '🔄 Next Multi-URL...');
+                clearTimeout(state.pollTimeout);
+                state.pollTimeout = setTimeout(() => {
+                    if (getTabRunning()) window.location.href = nextUrl;
+                }, 1500);
+                return;
+            }
+
             const tcin = extractTcin();
             if (tcin) {
+                console.log('Target Bot: Starting dual-mode monitoring for TCIN: ' + tcin);
                 startDualModeMonitoring(tcin);
             } else {
                 const interval = getPollInterval();
@@ -1366,46 +1455,239 @@
                 const m = window.location.pathname.match(/\/s\/([^/]+)/);
                 if (m) term = decodeURIComponent(m[1]);
             }
-            term = (term || 'pokemon').trim().replace(/^pokimon$/i, 'pokemon');
+            term = (term || 'pokemon').trim().replace(/pokimon/gi, 'pokemon');
             return term || 'pokemon';
         } catch (e) {
             return 'pokemon';
         }
     }
 
-    async function querySearchApi(keyword, count = 24) {
+    async function querySearchApi(keyword, count = 36) {
         const apiKey = '9f36aeafbe60771e321a7cc95a78140772ab3e96';
-        const cleanKw = (keyword || 'pokemon').trim().replace(/^pokimon$/i, 'pokemon');
+        const cleanKw = (keyword || 'pokemon').trim().replace(/pokimon/gi, 'pokemon');
         const url = `https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2?key=${apiKey}&channel=WEB&count=${count}&default_purchasability_filter=true&include_sponsored=true&keyword=${encodeURIComponent(cleanKw)}&offset=0&page=%2Fs%2F${encodeURIComponent(cleanKw)}&platform=desktop&pricing_store_id=3991`;
 
         try {
-            const resp = await fetch(url, {
+            const res = await httpRequest({
+                method: 'GET',
+                url: url,
                 headers: { 'Accept': 'application/json' },
-                cache: 'no-store',
             });
-
-            if (resp.ok) {
-                const data = await resp.json();
-                const rawProducts = data?.data?.search?.products || [];
-                return rawProducts.map(p => {
-                    const tcin = p.tcin;
-                    const title = p.item?.product_description?.title || p.title || '';
-                    const buyUrl = p.item?.enrichment?.buy_url || (tcin ? `https://www.target.com/p/-/-/A-${tcin}` : null);
-                    const price = p.price?.current_retail || parseFloat((p.price?.formatted_current_price || '').replace(/[^0-9.]/g, '')) || null;
-                    const shipStatus = p.fulfillment?.shipping_options?.availability_status;
-                    const storeStatus = p.fulfillment?.store_options?.availability_status;
-                    const isAvailable = shipStatus === 'IN_STOCK' || storeStatus === 'IN_STOCK' || Boolean(p.fulfillment?.shipping_options?.services?.length);
-                    return { tcin, title, buyUrl, price, isAvailable };
-                });
-            }
+            const rawText = ((typeof res === 'string' ? res : (res?.responseText || '')).trim()) || '{}';
+            const data = JSON.parse(rawText);
+            const rawProducts = data?.data?.search?.products || [];
+            return rawProducts.map(p => {
+                const tcin = p.tcin;
+                const title = p.item?.product_description?.title || p.title || '';
+                const buyUrl = p.item?.enrichment?.buy_url || (tcin ? `https://www.target.com/p/-/-/A-${tcin}` : null);
+                const price = p.price?.current_retail || parseFloat((p.price?.formatted_current_price || '').replace(/[^0-9.]/g, '')) || null;
+                const shipStatus = p.fulfillment?.shipping_options?.availability_status;
+                const storeStatus = p.fulfillment?.store_options?.availability_status;
+                const isAvailable = shipStatus === 'IN_STOCK' || storeStatus === 'IN_STOCK' || Boolean(p.fulfillment?.shipping_options?.services?.length);
+                return { tcin, title, buyUrl, price, isAvailable };
+            });
         } catch (e) {
-            // Fallback gracefully
+            console.log(`Target Bot: API Search background check: ${e.message}`);
         }
         return null;
     }
 
+    // =====================================================================
+    //  DOM PRODUCT CARD EXTRACTOR (Search & Category Pages)
+    // =====================================================================
+    function extractDomProducts() {
+        const products = [];
+        const seenTcins = new Set();
+
+        const links = Array.from(document.querySelectorAll('a[href*="/p/"]'));
+        for (const link of links) {
+            const href = link.href || '';
+            const m = href.match(/A-(\d+)/);
+            if (!m) continue;
+            const tcin = m[1];
+            if (seenTcins.has(tcin)) continue;
+
+            const card = link.closest(
+                '[data-test*="ProductCard"], [data-test="product-card"], [data-test="@web/ProductCard/body"], ' +
+                '[data-test="@web/site-top-of-funnel/ProductCardWrapper"], div[class*="ProductCard"], li, div[data-component="ProductCard"]'
+            ) || link.parentElement?.parentElement?.parentElement;
+
+            let title = '';
+            const titleEl = card ? (card.querySelector('[data-test="product-title"]') || card.querySelector('h3') || card.querySelector('h2')) : null;
+            if (titleEl && titleEl.textContent.trim()) {
+                title = titleEl.textContent.trim();
+            } else if (link.textContent.trim().length > 5) {
+                title = link.textContent.trim();
+            }
+
+            let price = null;
+            const priceEl = card ? (card.querySelector('[data-test="product-price"]') || card.querySelector('[data-test="current-price"]')) : null;
+            if (priceEl) {
+                const pm = priceEl.textContent.match(/\$([0-9]+(?:\.[0-9]{2})?)/);
+                if (pm) price = parseFloat(pm[1]);
+            }
+
+            const cardText = (card ? card.textContent : '').toLowerCase();
+            const isOos = cardText.includes('sold out online') ||
+                          cardText.includes('out of stock online') ||
+                          cardText.includes('currently unavailable') ||
+                          Boolean(card?.querySelector('[data-test="outOfStockButton"]')) ||
+                          Boolean(card?.querySelector('[data-test="soldOutButton"]'));
+
+            let atcBtn = null;
+            if (card) {
+                atcBtn = card.querySelector(
+                    'button[id*="addToCart"]:not([disabled]), ' +
+                    'button[data-test*="addToCart"]:not([disabled]), ' +
+                    'button[data-test="shippingButton"]:not([disabled]), ' +
+                    'button[data-test="orderPickupButton"]:not([disabled]), ' +
+                    'button[data-test="chooseOptionsButton"]:not([disabled]), ' +
+                    'button[aria-label*="Add to cart" i]:not([disabled])'
+                );
+                if (!atcBtn) {
+                    const btns = Array.from(card.querySelectorAll('button:not([disabled])'));
+                    atcBtn = btns.find(b => (b.textContent || '').trim().toLowerCase().includes('add to cart'));
+                }
+            }
+
+            const isAvailable = !isOos && (Boolean(atcBtn) || !cardText.includes('out of stock'));
+            const cleanUrl = `https://www.target.com/p/-/-/A-${tcin}`;
+            seenTcins.add(tcin);
+
+            products.push({
+                tcin,
+                title,
+                buyUrl: cleanUrl,
+                price,
+                isAvailable,
+                atcBtn,
+                card
+            });
+        }
+        return products;
+    }
+
+    // =====================================================================
+    //  AUTO-POPULATE MULTI-URL MONITOR BOX
+    // =====================================================================
+    function updateMultiUrlBoxWithMatches(matchingUrls) {
+        if (!matchingUrls || matchingUrls.length === 0) return 0;
+
+        const existingRaw = GM_getValue('multiUrls', '').trim();
+        const existingList = existingRaw ? existingRaw.split('\n').map(u => u.trim()).filter(u => u.startsWith('http')) : [];
+        const existingTcins = new Set(existingList.map(u => extractTcin(u)).filter(Boolean));
+
+        let addedCount = 0;
+        for (const url of matchingUrls) {
+            const tcin = extractTcin(url);
+            if (tcin && !existingTcins.has(tcin)) {
+                existingList.push(url);
+                existingTcins.add(tcin);
+                addedCount++;
+            }
+        }
+
+        if (addedCount > 0) {
+            const updatedText = existingList.join('\n');
+            GM_setValue('multiUrls', updatedText);
+
+            const textarea = document.getElementById('bot-multi-urls');
+            if (textarea) {
+                textarea.value = updatedText;
+            }
+            console.log(`Target Bot: 📋 Added ${addedCount} matching product URLs to Multi-URL Monitor box (Total: ${existingList.length}).`);
+        }
+        return addedCount;
+    }
+
+    function getNextMultiUrl(currentUrl = window.location.href) {
+        const rawUrls = GM_getValue('multiUrls', '').trim();
+        if (!rawUrls) return null;
+
+        const urls = rawUrls.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
+        if (urls.length <= 1) return null;
+
+        const currentTcin = extractTcin(currentUrl);
+        let currentIdx = -1;
+        if (currentTcin) {
+            currentIdx = urls.findIndex(u => extractTcin(u) === currentTcin);
+        }
+        const nextIdx = (currentIdx + 1) % urls.length;
+        return urls[nextIdx];
+    }
+
+    // =====================================================================
+    //  PARALLEL MULTI-TAB WORKER COORDINATOR
+    // =====================================================================
+    function updateQueueDisplayUI(queueLen, activeCount) {
+        const el = document.getElementById('bot-queue-status');
+        if (!el) return;
+        const q = queueLen !== undefined ? queueLen : (() => { try { return JSON.parse(GM_getValue('workerUrlQueue', '[]')).length; } catch(e) { return 0; } })();
+        const a = activeCount !== undefined ? activeCount : (() => { try { return JSON.parse(GM_getValue('activeWorkerList', '[]')).length; } catch(e) { return 0; } })();
+        el.textContent = `Queue: ${q} | Open: ${a}`;
+        el.style.color = a > 0 ? '#16a34a' : '#d97706';
+    }
+
+    function openNextWorkerTabs() {
+        if (!getTabRunning()) return;
+
+        const purchased = getPurchasedCount();
+        const targetGoal = getTargetGoal();
+        if (purchased >= targetGoal) {
+            console.log(`Target Bot [Coordinator]: 🎯 Purchase goal reached (${purchased}/${targetGoal})! Stopping coordinator.`);
+            setTabRunning(false);
+            updateStatusUI(false, '🎯 Goal Reached');
+            return;
+        }
+
+        const parallelLimit = Math.max(1, Math.min(5, parseInt(GM_getValue('parallelTabs', '2'), 10) || 2));
+        let queue = [];
+        try { queue = JSON.parse(GM_getValue('workerUrlQueue', '[]')); } catch (e) { queue = []; }
+
+        let activeWorkers = [];
+        try { activeWorkers = JSON.parse(GM_getValue('activeWorkerList', '[]')); } catch (e) { activeWorkers = []; }
+
+        const now = Date.now();
+        activeWorkers = activeWorkers.filter(w => (now - (w.time || 0)) < 75000);
+
+        const availableSlots = Math.max(0, parallelLimit - activeWorkers.length);
+        console.log(`Target Bot [Coordinator]: Queue: ${queue.length} items. Active workers: ${activeWorkers.length}/${parallelLimit}. Available slots: ${availableSlots}.`);
+
+        if (availableSlots <= 0 || queue.length === 0) {
+            updateQueueDisplayUI(queue.length, activeWorkers.length);
+            return;
+        }
+
+        const toOpen = Math.min(availableSlots, queue.length);
+        for (let i = 0; i < toOpen; i++) {
+            const rawUrl = queue.shift();
+            if (!rawUrl) break;
+
+            const sep = rawUrl.includes('?') ? '&' : '?';
+            const workerUrl = `${rawUrl}${sep}bot_worker=1`;
+            const workerTabRef = 'worker_' + Math.random().toString(36).substring(2, 9);
+
+            activeWorkers.push({ id: workerTabRef, url: rawUrl, time: Date.now(), freed: false });
+            console.log(`Target Bot [Coordinator]: 🪟 [${i + 1}/${toOpen}] Opening worker tab (${workerTabRef}): ${rawUrl}`);
+
+            const newWindow = window.open(workerUrl, '_blank');
+            if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+                console.log('Target Bot [Coordinator]: ⚠️ POPUP BLOCKED by browser! Please allow popups for target.com in address bar.');
+                updateStatusUI(true, '⚠️ Allow Popups!');
+            }
+        }
+
+        GM_setValue('workerUrlQueue', JSON.stringify(queue));
+        GM_setValue('activeWorkerList', JSON.stringify(activeWorkers));
+        updateQueueDisplayUI(queue.length, activeWorkers.length);
+    }
+
+    // =====================================================================
+    //  SEARCH PAGE HANDLER — Auto-Extract Matches, Populate Box & Buy
+    // =====================================================================
     async function handleSearchPage() {
         if (!getTabRunning()) return;
+        if (handleBotChallenge()) return;
 
         const autoScanEnabled = GM_getValue('pokemonAutoScan', true);
         if (!autoScanEnabled) {
@@ -1421,101 +1703,89 @@
         const keywordsStr = GM_getValue('pokemonKeywords', 'pokemon, pokimon, 30th, ascended, pitch black, booster, elite trainer, scarlet, celebration, tin, collection, pack, box, tcg');
         const keywords = keywordsStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
 
-        const blacklistStr = GM_getValue('pokemonBlacklist', 'shirt, socks, hoodie, costume, plush, binder, book, blanket');
+        const blacklistStr = GM_getValue('pokemonBlacklist', '');
         const blacklist = blacklistStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
 
         const maxPrice = getMaxPrice();
         const skipPriceCheck = GM_getValue('skipPriceCheck', true);
 
-        console.log(`Target Bot: ⚡ API Search Check #${pollNum} for "${searchTerm}" (Zero-Reload)...`);
-        updateStatusUI(true, `⚡ API Polling #${pollNum}`);
+        console.log(`Target Bot: ⚡ Scanning Search Page #${pollNum} for "${searchTerm}"...`);
+        updateStatusUI(true, `⚡ Scanning #${pollNum}`);
 
-        // 1. FAST BACKGROUND API CHECK (Zero Page Reload)
-        const apiProducts = await querySearchApi(searchTerm, 24);
+        // Helper to check if title matches keywords
+        const isProductMatch = (title) => {
+            if (!title) return false;
+            const lower = title.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            if (blacklist.some(b => lower.includes(b))) return false;
+            if (buyAny) return true;
+            if (keywords.length === 0) return true;
+            return keywords.some(k => lower.includes(k.normalize('NFD').replace(/[\u0300-\u036f]/g, '')));
+        };
 
+        const allMatchedProducts = new Map(); // TCIN -> product info
+
+        // 1. EXTRACT DOM PRODUCTS (Cards already rendered on page)
+        const domProducts = extractDomProducts();
+        for (const prod of domProducts) {
+            if (!isProductMatch(prod.title)) continue;
+            if (!skipPriceCheck && maxPrice > 0 && prod.price !== null && prod.price > maxPrice) continue;
+            allMatchedProducts.set(prod.tcin, prod);
+        }
+
+        // 2. QUERY REDSKY BACKGROUND SEARCH API
+        const apiProducts = await querySearchApi(searchTerm, 36);
         if (apiProducts && apiProducts.length > 0) {
             for (const prod of apiProducts) {
-                if (!prod.title || !prod.buyUrl) continue;
-                const lowerTitle = prod.title.toLowerCase();
-
-                // Blacklist filter
-                if (blacklist.some(b => lowerTitle.includes(b))) continue;
-
-                // Whitelist or buy-any filter
-                const isMatch = buyAny || keywords.length === 0 || keywords.some(k => lowerTitle.includes(k));
-                if (!isMatch) continue;
-
-                // Price limit filter
+                if (!prod.tcin) continue;
+                if (!isProductMatch(prod.title)) continue;
                 if (!skipPriceCheck && maxPrice > 0 && prod.price !== null && prod.price > maxPrice) continue;
 
-                // Stock availability
-                if (prod.isAvailable) {
-                    console.log(`Target Bot: 🎯 IN-STOCK DROP FOUND via API: "${prod.title}" (TCIN ${prod.tcin}, $${prod.price || 'N/A'})!`);
-                    Notifier.notifyStock(prod.tcin, prod.price);
-                    updateStatusUI(true, '🚀 Opening Drop...');
-                    window.location.href = prod.buyUrl;
-                    return;
+                if (allMatchedProducts.has(prod.tcin)) {
+                    const existing = allMatchedProducts.get(prod.tcin);
+                    existing.isAvailable = existing.isAvailable || prod.isAvailable;
+                    if (!existing.price && prod.price) existing.price = prod.price;
+                } else {
+                    allMatchedProducts.set(prod.tcin, prod);
                 }
             }
-            console.log(`Target Bot: API returned ${apiProducts.length} items — no in-stock matches yet.`);
         }
 
-        // 2. DOM FALLBACK CHECK (Checks visible cards without reloading)
-        const productCards = $$(
-            '[data-test="product-card"], ' +
-            '[data-test="@web/site-top-of-funnel/ProductCardWrapper"], ' +
-            '[data-test="@web/ProductCard/body"], ' +
-            'div[data-test="product-grid"] > div, ' +
-            'div[data-test="product-grid"] li, ' +
-            'div[data-component="ProductCard"]'
-        );
+        const matchedList = Array.from(allMatchedProducts.values());
+        console.log(`Target Bot: Found ${matchedList.length} matching products for "${searchTerm}".`);
 
-        for (const card of productCards) {
-            const titleEl = $('[data-test="product-title"]', card) || $('a[href*="/p/"]', card) || $('h2', card) || $('h3', card);
-            const title = (titleEl?.textContent || '').trim().toLowerCase();
-            const linkEl = $('a[href*="/p/"]', card) || card.closest('a[href*="/p/"]') || $('a', card);
-            const link = linkEl?.href;
-
-            if (!title || !link || !link.includes('/p/')) continue;
-            if (blacklist.some(b => title.includes(b))) continue;
-
-            const isMatch = buyAny || keywords.length === 0 || keywords.some(k => title.includes(k));
-            if (!isMatch) continue;
-
-            // Direct Add-to-Cart button on search card
-            const cardAtc = $('button[data-test="shippingButton"]:not([disabled])', card) ||
-                            $('button[id*="addToCart"]:not([disabled])', card) ||
-                            xpath(".//button[not(@disabled) and (contains(., 'Add to cart') or contains(., 'Ship it'))]", card);
-
-            if (cardAtc && isVisible(cardAtc) && !isDisabled(cardAtc)) {
-                console.log(`Target Bot: 🎯 In-stock card with direct ATC found in DOM: "${title}"`);
-                cardAtc.click();
-                watchForCartConfirmation();
-                return;
-            }
-
-            // Online stock check
-            const text = (card.textContent || '').toLowerCase();
-            const isOnlineOos =
-                text.includes('sold out online') ||
-                text.includes('out of stock online') ||
-                text.includes('temporarily out of stock') ||
-                text.includes('currently unavailable') ||
-                Boolean(card.querySelector('[data-test="outOfStockButton"]')) ||
-                Boolean(card.querySelector('[data-test="soldOutButton"]'));
-
-            if (!isOnlineOos) {
-                console.log(`Target Bot: 🎯 In-stock item found in DOM: "${title}" → Navigating...`);
-                updateStatusUI(true, '🚀 Opening Product...');
-                window.location.href = link;
-                return;
-            }
+        // 3. AUTOMATICALLY POPULATE MATCHED URLS INTO MULTI-URL MONITOR BOX
+        if (matchedList.length > 0) {
+            const matchingUrls = matchedList.map(p => p.buyUrl || `https://www.target.com/p/-/-/A-${p.tcin}`).filter(Boolean);
+            updateMultiUrlBoxWithMatches(matchingUrls);
         }
 
-        // 3. SCHEDULE NEXT BACKGROUND POLL (No Page Reload, Randomized Timing)
+        // 4. MULTI-TAB PARALLEL WORKER COORDINATION
+        const parallelLimit = Math.max(1, Math.min(5, parseInt(GM_getValue('parallelTabs', '2'), 10) || 2));
+        
+        // Sort matches: In-stock items first, then others
+        const sortedMatches = [...matchedList].sort((a, b) => (b.isAvailable ? 1 : 0) - (a.isAvailable ? 1 : 0));
+        const matchedUrls = sortedMatches.map(p => p.buyUrl || `https://www.target.com/p/-/-/A-${p.tcin}`).filter(Boolean);
+
+        if (matchedUrls.length > 0) {
+            let currentQueue = [];
+            try { currentQueue = JSON.parse(GM_getValue('workerUrlQueue', '[]')); } catch (e) { currentQueue = []; }
+            const mergedQueue = Array.from(new Set([...currentQueue, ...matchedUrls]));
+            GM_setValue('workerUrlQueue', JSON.stringify(mergedQueue));
+
+            // Set current search page tab as Coordinator
+            GM_setValue('coordinatorTabId', tabId);
+            GM_setValue('isCoordinatorRunning', 'true');
+
+            console.log(`Target Bot [Coordinator]: Queue updated with ${mergedQueue.length} matching products. Opening worker tabs (parallel: ${parallelLimit})...`);
+            openNextWorkerTabs();
+        } else {
+            console.log('Target Bot [Coordinator]: No matching products found on this scan.');
+        }
+
+        // 5. SCHEDULE NEXT BACKGROUND SCAN (No Page Reload, Randomized Timing)
         const interval = getPollInterval();
-        console.log(`Target Bot: 🎲 Next background API search in ${(interval / 1000).toFixed(2)}s (${interval}ms random interval)...`);
-        updateStatusUI(true, `⚡ Poll in ${(interval / 1000).toFixed(1)}s`);
+        console.log(`Target Bot: 🎲 Next search scan in ${(interval / 1000).toFixed(2)}s (${interval}ms)...`);
+        updateStatusUI(true, `⚡ Scan in ${(interval / 1000).toFixed(1)}s`);
         clearTimeout(state.searchPollTimeout);
         state.searchPollTimeout = setTimeout(() => {
             if (getTabRunning()) {
@@ -1525,26 +1795,22 @@
     }
 
     // =====================================================================
-    //  DAY 2: MULTI-URL MONITOR MODE
-    // =====================================================================
-    function handleMultiUrlMonitor() {
-        const rawUrls = GM_getValue('multiUrls', '').trim();
-        if (!rawUrls) return false;
-
-        const urls = rawUrls.split('\n').map(u => u.trim()).filter(u => u.startsWith('http'));
-        if (urls.length <= 1) return false;
-
-        // Cycle through URLs if current URL is out of stock
-        console.log(`Target Bot: Multi-URL mode active with ${urls.length} URLs.`);
-        return true;
-    }
-
-    // =====================================================================
     //  CHECKOUT HANDLER — Fast loop with Auto-CVV & Place Order
     // =====================================================================
     function handleCheckoutPage() {
         if (!getTabRunning()) return;
         console.log('Target Bot: Handling checkout page...');
+
+        const isWorkerTab = window.location.href.includes('bot_worker=1') || window.sessionStorage.getItem('target_bot_worker') === 'true';
+        if (isWorkerTab && !window.sessionStorage.getItem('checkout_broadcast_sent')) {
+            window.sessionStorage.setItem('checkout_broadcast_sent', 'true');
+            console.log('Target Bot [Worker]: 🛒 Reached checkout page! Notifying coordinator to open next product immediately...');
+            sendBroadcast('WORKER_CHECKOUT_REACHED', {
+                url: window.location.href,
+                tcin: extractTcin()
+            });
+        }
+
         if (state.checkoutLoop) return;
 
         state.checkoutLoop = setInterval(() => {
@@ -1563,15 +1829,27 @@
 
                 console.log(`Target Bot: 🎉 Order confirmed! Total units: ${newTotal}/${targetGoal}`);
                 Notifier.notifyOrderConfirmed(qtyBought);
+                sendBroadcast('ORDER_COMPLETED', { totalPurchased: newTotal, qtyAdded: qtyBought });
+                sendBroadcast('WORKER_ORDER_DONE', { url: window.location.href, tcin: extractTcin() });
+
+                if (isWorkerTab) {
+                    console.log('Target Bot [Worker]: 🏆 Order completed! Auto-closing worker tab in 4s...');
+                    updateStatusUI(true, '🏆 Order Confirmed! (Closing...)');
+                    clearInterval(state.checkoutLoop); state.checkoutLoop = null;
+                    setTimeout(() => {
+                        try { window.close(); } catch (e) {}
+                    }, 4000);
+                    return;
+                }
 
                 // Day 2 Repeat Purchase Loop
                 if (newTotal < targetGoal && GM_getValue('repeatPurchaseLoop', true)) {
-                    console.log(`Target Bot: 🔄 Repeat Purchase Loop: ${newTotal}/${targetGoal} purchased. Returning to product/monitor in 3s...`);
+                    const nextUrl = getNextMultiUrl() || GM_getValue('lastProductUrl', '') || 'https://www.target.com/s?searchTerm=pokemon';
+                    console.log(`Target Bot: 🔄 Repeat Purchase Loop: ${newTotal}/${targetGoal} purchased. Continuing with next product in 2.5s: ${nextUrl}...`);
                     updateStatusUI(true, `🔄 Bought ${newTotal}/${targetGoal}`);
                     setTimeout(() => {
-                        const returnUrl = GM_getValue('lastProductUrl', '') || 'https://www.target.com/s?searchTerm=pokemon';
-                        window.location.href = returnUrl;
-                    }, 3000);
+                        window.location.href = nextUrl;
+                    }, 2500);
                     return;
                 }
 
@@ -1592,6 +1870,14 @@
                     console.log('Target Bot: ⚠️ Item was removed from cart or sold out!');
                     Notifier.notifyError('Item was removed from cart or sold out during checkout!');
                     clearInterval(state.checkoutLoop); state.checkoutLoop = null;
+
+                    if (isWorkerTab) {
+                        sendBroadcast('WORKER_ERROR', { url: window.location.href, tcin: extractTcin(), reason: 'sold_out' });
+                        updateStatusUI(true, '⚠️ Sold out (Closing...)');
+                        setTimeout(() => { try { window.close(); } catch (e) {} }, 1500);
+                        return;
+                    }
+
                     window.history.back();
                     return;
                 }
@@ -1743,10 +2029,70 @@
     }
 
     // =====================================================================
+    //  ANTI-BOT & CHALLENGE DETECTOR (PerimeterX / Akamai / Press & Hold)
+    // =====================================================================
+    function isBotChallengePresent() {
+        // 1. Visible PerimeterX Captcha container
+        const pxBox = document.getElementById('px-captcha') || document.querySelector('[data-test="px-captcha"]');
+        if (pxBox && isVisible(pxBox) && pxBox.offsetHeight > 40) {
+            return true;
+        }
+
+        // 2. Visible "Press & hold" button (outside of bot HUD)
+        const pressBtn = xpath("//button[not(ancestor::*[@id='target-bot-ui']) and (contains(., 'Press & hold') or contains(., 'Press and hold'))]");
+        if (pressBtn && isVisible(pressBtn)) {
+            return true;
+        }
+
+        // 3. Visible challenge modal — DOM text scan (avoids XPath apostrophe/quote parsing errors)
+        const challengePhrases = [
+            'quick verification',
+            'press & hold to confirm you',
+            'press and hold to confirm',
+            'sorry for the wait',
+            'verifying you are human',
+            'one moment please'
+        ];
+        const botHudEl = document.getElementById('target-bot-ui');
+        const challengeEls = Array.from(document.querySelectorAll('h1, h2, h3, p, div'));
+        for (const el of challengeEls) {
+            if (botHudEl && botHudEl.contains(el)) continue;
+            const t = (el.textContent || '').toLowerCase();
+            if (challengePhrases.some(p => t.includes(p)) && isVisible(el)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function handleBotChallenge() {
+        if (!isBotChallengePresent()) return false;
+
+        console.log('Target Bot: ⚠️ Quick verification / PerimeterX challenge detected! Pausing bot...');
+        updateStatusUI(false, '⚠️ Solve "Press & Hold"');
+        Sound.errorAlert();
+
+        // Check every 1.5s until user solves it, then auto-resume
+        clearTimeout(state.challengeTimeout);
+        state.challengeTimeout = setTimeout(() => {
+            if (!isBotChallengePresent()) {
+                console.log('Target Bot: ✅ Challenge solved! Resuming operations...');
+                updateStatusUI(true, '✅ Resumed');
+                runBot();
+            } else {
+                handleBotChallenge();
+            }
+        }, 1500);
+        return true;
+    }
+
+    // =====================================================================
     //  STATE MACHINE — Routes to proper handler
     // =====================================================================
     function runBot() {
         if (!getTabRunning()) return;
+        if (handleBotChallenge()) return;
 
         const url = window.location.href;
 
@@ -2146,11 +2492,11 @@
                         <div class="tb-grid-2">
                             <div class="tb-field">
                                 <label class="tb-label" for="bot-min-delay">Random Delay Min (ms)</label>
-                                <input class="tb-input" type="number" id="bot-min-delay" min="100" max="10000" step="50" value="${GM_getValue('minDelay', '500')}" />
+                                <input class="tb-input" type="number" id="bot-min-delay" min="100" max="10000" step="50" value="${GM_getValue('minDelay', '1200')}" />
                             </div>
                             <div class="tb-field">
                                 <label class="tb-label" for="bot-max-delay">Random Delay Max (ms)</label>
-                                <input class="tb-input" type="number" id="bot-max-delay" min="200" max="30000" step="50" value="${GM_getValue('maxDelay', '1500')}" />
+                                <input class="tb-input" type="number" id="bot-max-delay" min="200" max="30000" step="50" value="${GM_getValue('maxDelay', '2400')}" />
                             </div>
                         </div>
 
@@ -2186,6 +2532,14 @@
                         </div>
 
                         <div class="tb-field">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                                <label class="tb-label" for="bot-parallel-tabs" style="margin:0;">Parallel Product Tabs (2–3 recommended)</label>
+                                <span id="bot-queue-status" style="font-size:10px; font-weight:700; color:#d97706;">Queue: 0 | Open: 0</span>
+                            </div>
+                            <input class="tb-input" type="number" id="bot-parallel-tabs" min="1" max="5" value="${GM_getValue('parallelTabs', '2')}" />
+                        </div>
+
+                        <div class="tb-field">
                             <label class="tb-label" for="bot-pokemon-keywords">Whitelist Keywords (comma separated)</label>
                             <input class="tb-input" type="text" id="bot-pokemon-keywords" value="${GM_getValue('pokemonKeywords', '30th, ascended, pitch black, booster, elite trainer, scarlet, celebration')}" />
                         </div>
@@ -2196,7 +2550,10 @@
                         </div>
 
                         <div class="tb-field">
-                            <label class="tb-label" for="bot-multi-urls">Multi-URL Monitor (1 Target product URL per line)</label>
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+                                <label class="tb-label" for="bot-multi-urls" style="margin:0;">Multi-URL Monitor (1 Target URL per line)</label>
+                                <button type="button" id="bot-populate-urls-btn" class="tb-btn tb-btn-secondary" style="padding:2px 8px; font-size:10px;" title="Scan page & populate matching URLs">📥 Extract Matches</button>
+                            </div>
                             <textarea class="tb-input" id="bot-multi-urls" placeholder="https://www.target.com/p/...">${GM_getValue('multiUrls', '')}</textarea>
                         </div>
                     </div>
@@ -2367,11 +2724,12 @@
         const save = () => {
             GM_setValue('qty',                 $('#bot-qty')?.value || '1');
             GM_setValue('maxPrice',            $('#bot-max-price')?.value || '0');
-            GM_setValue('minDelay',            $('#bot-min-delay')?.value || '500');
-            GM_setValue('maxDelay',            $('#bot-max-delay')?.value || '1500');
+            GM_setValue('minDelay',            $('#bot-min-delay')?.value || '1200');
+            GM_setValue('maxDelay',            $('#bot-max-delay')?.value || '2400');
             GM_setValue('cvv',                 $('#bot-cvv')?.value || '');
             GM_setValue('dropTime',            $('#bot-drop-time')?.value || '');
             GM_setValue('targetGoal',          $('#bot-target-goal')?.value || '1000');
+            GM_setValue('parallelTabs',        $('#bot-parallel-tabs')?.value || '2');
             GM_setValue('pokemonKeywords',     $('#bot-pokemon-keywords')?.value || '');
             GM_setValue('pokemonBlacklist',    $('#bot-pokemon-blacklist')?.value || '');
             GM_setValue('multiUrls',           $('#bot-multi-urls')?.value || '');
@@ -2385,7 +2743,7 @@
 
         [
             'bot-qty', 'bot-max-price', 'bot-min-delay', 'bot-max-delay', 'bot-cvv', 'bot-drop-time', 'bot-target-goal',
-            'bot-pokemon-keywords', 'bot-pokemon-blacklist', 'bot-multi-urls',
+            'bot-parallel-tabs', 'bot-pokemon-keywords', 'bot-pokemon-blacklist', 'bot-multi-urls',
             'bot-account-profiles', 'bot-active-account',
             'bot-discord-webhook', 'bot-telegram-token', 'bot-telegram-chat-id'
         ].forEach(id => {
@@ -2454,16 +2812,54 @@
             } catch (e) {}
         });
 
+        // Manual Extract Matching Products button
+        $('#bot-populate-urls-btn')?.addEventListener('click', async () => {
+            console.log('Target Bot: Manually extracting matching products for Multi-URL Monitor...');
+            const domProds = extractDomProducts();
+            const searchTerm = extractSearchTerm();
+            const apiProds = await querySearchApi(searchTerm, 36) || [];
+
+            const buyAny = GM_getValue('buyAnyPokemon', true);
+            const keywordsStr = GM_getValue('pokemonKeywords', 'pokemon, pokimon, 30th, ascended, pitch black, booster, elite trainer, scarlet, celebration');
+            const keywords = keywordsStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+            const blacklistStr = GM_getValue('pokemonBlacklist', '');
+            const blacklist = blacklistStr.toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+
+            const isMatch = (title) => {
+                if (!title) return false;
+                const lower = title.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+                if (blacklist.some(b => lower.includes(b))) return false;
+                if (buyAny || keywords.length === 0) return true;
+                return keywords.some(k => lower.includes(k.normalize('NFD').replace(/[\u0300-\u036f]/g, '')));
+            };
+
+            const allUrls = [];
+            domProds.forEach(p => { if (isMatch(p.title)) allUrls.push(p.buyUrl); });
+            apiProds.forEach(p => { if (isMatch(p.title) && p.buyUrl) allUrls.push(p.buyUrl); });
+
+            const added = updateMultiUrlBoxWithMatches(allUrls);
+            const totalCount = (GM_getValue('multiUrls', '').split('\n').filter(u => u.trim().startsWith('http'))).length;
+            console.log(`Target Bot: Multi-URL Monitor updated: ${totalCount} products (${added} newly added).`);
+        });
+
         // Start / Stop
         $('#bot-start')?.addEventListener('click', () => {
             Sound.getContext();
             save();
             setTabRunning(true);
-            updateStatusUI(true);
+            updateStatusUI(true, 'Running');
             metrics.reset();
             state.placeOrderAttempted = false;
+            if (window.location.pathname.startsWith('/s') || window.location.pathname.startsWith('/c')) {
+                GM_setValue('activeWorkerList', '[]');
+                GM_setValue('workerUrlQueue', '[]');
+                GM_setValue('coordinatorTabId', tabId);
+                GM_setValue('isCoordinatorRunning', 'true');
+            }
             sendBroadcast('GLOBAL_START');
-            preWarmSession().then(() => runBot());
+            // Run bot immediately (zero latency)
+            runBot();
+            preWarmSession().catch(() => {});
         });
 
         $('#bot-stop')?.addEventListener('click', () => {
@@ -2520,6 +2916,9 @@
                     GM_setValue('activeAccountIndex', String(idx));
                     console.log(`Target Bot: Active account switched to: ${acc.name}`);
                     renderAccounts();
+        setInterval(() => {
+            updateQueueDisplayUI();
+        }, 1000);
                 });
 
                 // Delete account
@@ -2530,6 +2929,9 @@
                         GM_setValue('activeAccountIndex', String(Math.max(0, profiles.length - 1)));
                     }
                     renderAccounts();
+        setInterval(() => {
+            updateQueueDisplayUI();
+        }, 1000);
                 });
 
                 listEl.appendChild(item);
@@ -2553,10 +2955,16 @@
             $('#bot-new-acc-name').value = '';
             $('#bot-new-acc-cvv').value = '';
             renderAccounts();
+        setInterval(() => {
+            updateQueueDisplayUI();
+        }, 1000);
             console.log(`Target Bot: Added account "${name}".`);
         });
 
         renderAccounts();
+        setInterval(() => {
+            updateQueueDisplayUI();
+        }, 1000);
 
         setInterval(updateMetricsUI, 500);
         updateStatusUI(getTabRunning());

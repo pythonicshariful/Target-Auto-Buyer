@@ -1,0 +1,12 @@
+# Logs & Temporary files
+*.log
+*.tmp
+view-source*
+patch*.ps1
+patch*.js
+check_*.js
+update_*.js
+
+# OS generated files
+.DS_Store
+Thumbs.db

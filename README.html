@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Target Auto Buyer ⚡ v3.2 — Complete Documentation & User Manual</title>
+    <title>Target Auto Buyer ⚡ v4.2 — Complete Documentation & User Manual</title>
     <!-- Optional Mermaid.js for interactive rendering if online -->
     <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
     <script>
@@ -619,11 +619,13 @@
 
     <!-- Hero Header -->
     <div class="hero">
-        <h1>🎯 Target Auto Buyer ⚡ v3.2</h1>
+        <h1>🎯 Target Auto Buyer ⚡ v4.2</h1>
         <p>Ultra-low latency browser automation suite for Target.com drops. Features dual-mode API stock monitoring, accelerated add-to-cart, single-pass checkout execution, and instant Discord, Telegram, and synthesized audio alerts.</p>
         <div class="badges">
             <span class="badge">Tampermonkey / Violentmonkey</span>
-            <span class="badge">v3.2 Stable</span>
+            <span class="badge">v4.2 Stable</span>
+            <span class="badge">🪟 Parallel Multi-Tab Engine</span>
+            <span class="badge">📥 Search Coordinator</span>
             <span class="badge">💬 Discord Webhooks</span>
             <span class="badge">✈️ Telegram Bot API</span>
             <span class="badge">🔊 Web Audio Synthesizer</span>
@@ -634,14 +636,25 @@
 
     <!-- 1. What's New in v3.2 -->
     <div class="card" id="whats-new">
-        <h2>⚡ Version 3.2 — Multi-Channel Alerts Update</h2>
-        <p>Version 3.2 introduces platform-specific instant notifications with custom visual and audio feedback:</p>
+        <h2>⚡ Version 4.2 — Parallel Multi-Tab Buying & Pokemon Drop Edition</h2>
+        <p>Version 4.2 introduces the groundbreaking <strong>Parallel Multi-Tab Buying Engine</strong> alongside automated search harvesting and hardened anti-bot resilience:</p>
         <ul>
-            <li><strong>💬 Discord Webhook Integration:</strong> Rich colored visual embeds featuring direct Target item links, formatted price/quantity badges, latency metrics, and local timestamps.</li>
-            <li><strong>✈️ Telegram Bot Integration:</strong> Real-time push alerts via Telegram Bot API with clean HTML hierarchy, copyable code tags for TCIN and price, and quick action links.</li>
-            <li><strong>🔊 Zero-Dependency Web Audio Synthesizer:</strong> Plays custom acoustic chimes for In-Stock detection, Cart Confirmation, Order Placed fanfare, and errors without audio file downloads or CORS issues.</li>
-            <li><strong>🧪 In-HUD Verification Testing:</strong> Instant "Test" buttons allow you to verify Discord webhook connectivity, Telegram bot delivery, and speaker output before drop time.</li>
-            <li><strong>⚙️ Selective Event Checkboxes:</strong> Choose specifically which events notify you: Stock Alert, Cart Added, Order Placed, and Errors/Alerts.</li>
+            <li><strong>🪟 Parallel Multi-Tab Buying (2–3 Tabs Concurrently):</strong> The search page operates as an active <strong>Coordinator</strong>, opening 2 to 3 product tabs simultaneously to process items in parallel instead of one by one.</li>
+            <li><strong>📥 Auto-Populate Multi-URL Box from Search:</strong> Automatically extracts matching product URLs from rendered DOM cards and Target's background Redsky API, directly feeding the Multi-URL Monitor and purchase queue.</li>
+            <li><strong>🛒 Dynamic Slot Replenishment on Checkout:</strong> As soon as any worker tab adds an item to cart and advances to <code>/checkout</code>, it broadcasts <code>WORKER_CHECKOUT_REACHED</code> via BroadcastChannel. The coordinator immediately opens the <strong>next product tab from the queue</strong>!</li>
+            <li><strong>⏱️ Auto-Close Finished & OOS Tabs:</strong>
+                <ul>
+                    <li><strong>Order Confirmed:</strong> Automatically adds units toward your Total Purchase Goal, alerts Discord/Telegram, and closes the worker tab after 4 seconds.</li>
+                    <li><strong>Out of Stock (OOS):</strong> Signals coordinator to launch the next item and auto-closes the tab after 1.5 seconds.</li>
+                </ul>
+            </li>
+            <li><strong>🛡️ Hardened Anti-Bot & Stability Fixes:</strong>
+                <ul>
+                    <li>Replaced fragile string-escaped XPath evaluation with safe DOM text queries, eliminating syntax errors on Cloudflare/Target verification prompts.</li>
+                    <li>Added JSON payload guards on Redsky search API calls to eliminate unexpected end-of-JSON errors.</li>
+                    <li>Normalized search terms like <code>pokimon card</code> to map directly to official Pokemon product listings.</li>
+                </ul>
+            </li>
         </ul>
     </div>
 
@@ -829,27 +842,36 @@
         <div class="mermaid-wrapper">
             <pre class="mermaid">
 flowchart TD
-    A[Product Page Loaded] --> B{Item in Stock?}
-    B -- No --> C[Dual-Mode Monitoring]
-    C -->|RedSky API Polling 250ms| D{Stock Detected?}
-    C -->|DOM MutationObserver| D
-    D -- No --> C
-    D -- Yes --> E{Out-of-stock cleared?}
-    E -- No --> C
-    E -- Yes --> F{ATC Button Ready?}
-    F -- Yes --> G[Click ATC Immediately]
-    F -- No --> H[Reload Page] --> G
-    B -- Yes --> G
-    G --> I[Cart Drawer Observer]
-    I -->|Cart Confirmed / Timeout| J[Instant Redirect to /checkout]
-    J --> K{Checkout State}
-    K -->|2FA or Login Challenge| L[Complete challenge manually]
-    K -->|CVV Prompt| M[Auto-Fill CVV & Confirm in 1 Pass]
-    K -->|Ready for Review| N[Click Place Order Once]
-    N --> O{Confirmation Detected?}
-    O -- Yes --> P[🎉 Order Confirmed! 🔊 Fanfare + 💬 Discord + ✈️ Telegram]
-    O -- No --> Q[⚠️ Stop & Verify Order Manually via Email/Account]
-            </pre>
+    %% Parallel Multi-Tab Architecture
+    subgraph Coordinator ["Search Page Coordinator (https://target.com/s?searchTerm=pokemon)"]
+        A[Start Bot on Search Page] --> B[Dual-Scan: DOM Cards + Redsky API]
+        B --> C[Keyword Whitelist & Blacklist Filter]
+        C --> D[Auto-Populate Multi-URL Monitor Box]
+        D --> E[Queue Matching URLs - In-Stock First]
+        E --> F[Check Available Slots: limit 2-3 tabs]
+        F --> G[Launch Worker Tabs via window.open]
+        Z[Listen on BroadcastChannel] --> F
+    end
+
+    subgraph Workers ["Worker Product Tabs (target.com/p/...)"]
+        G --> H1[Worker Tab 1: /p/...]
+        G --> H2[Worker Tab 2: /p/...]
+        
+        H1 --> I1{Active ATC Button?}
+        I1 -- Yes --> J1[Apply Qty & Click Add to Cart]
+        I1 -- No / OOS --> K1[Broadcast WORKER_OOS] --> L1[Auto-Close Tab in 1.5s]
+        
+        J1 --> M1[Fulfillment Drawer / Protection Plan Bypass]
+        M1 --> N1[Advance to /checkout]
+        N1 --> O1[Broadcast WORKER_CHECKOUT_REACHED]
+        O1 -. Free Slot .-> Z
+        
+        N1 --> P1[Auto-Fill CVV & Submit Place Order]
+        P1 --> Q1[Detect Order Confirmation]
+        Q1 --> R1[Broadcast ORDER_COMPLETED]
+        R1 --> S1[Update Goal UI + Send Discord/Telegram]
+        S1 --> T1[Auto-Close Tab in 4s]
+    end</pre>
         </div>
     </div>
 
@@ -1230,6 +1252,51 @@ flowchart LR
             </thead>
             <tbody>
                 <tr>
+                    <td><strong>Parallel Product Tabs</strong></td>
+                    <td>Number of product tabs to run concurrently (2–3 recommended). When any tab reaches checkout, the next tab opens immediately.</td>
+                    <td><code>2</code> or <code>3</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Live Queue Status</strong></td>
+                    <td>Real-time badge showing remaining queued product URLs and currently active worker tabs.</td>
+                    <td><code>Queue: X | Open: Y</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Auto-Scan Pokemon Categories</strong></td>
+                    <td>Auto-scans search pages (e.g. <code>pokimon card</code>) and category pages via DOM cards + Redsky API.</td>
+                    <td><code>ON</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Buy ANY In-Stock Pokemon Card</strong></td>
+                    <td>When OFF, filters strictly by your keyword whitelist. Turn OFF to prevent buying Monopoly or Mario.</td>
+                    <td><code>OFF</code> (Whitelist mode)</td>
+                </tr>
+                <tr>
+                    <td><strong>Repeat Purchase Loop</strong></td>
+                    <td>Automatically cycles through the Multi-URL queue to continuously buy until the Goal is reached.</td>
+                    <td><code>ON</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Total Purchase Goal (units)</strong></td>
+                    <td>Target total units across all checkout orders. Coordinator stops when goal is reached.</td>
+                    <td><code>1000</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Whitelist Keywords</strong></td>
+                    <td>Comma-separated positive keywords. Product title must match at least one keyword.</td>
+                    <td><code>pokemon, pokimon, booster, elite trainer, tin, pack, tcg</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Blacklist Keywords</strong></td>
+                    <td>Comma-separated negative keywords. Automatically skips apparel, plushies, binders, etc.</td>
+                    <td><code>shirt, socks, hoodie, costume, plush, binder, book</code></td>
+                </tr>
+                <tr>
+                    <td><strong>Multi-URL Monitor</strong></td>
+                    <td>Target URLs to monitor/buy (1 per line). Automatically populated by search scan or Extract button.</td>
+                    <td>Auto-populated</td>
+                </tr>
+                <tr>
                     <td><strong>CVV</strong></td>
                     <td>Card security code for your saved Target payment card. Auto-filled during single-pass checkout.</td>
                     <td>Your saved card's CVV</td>
@@ -1288,6 +1355,7 @@ flowchart LR
         <h2>🧪 Safe Testing Guide (Dry-Run Verification)</h2>
         <p>Verify that all bot systems and notification integrations are functioning without risking an unwanted purchase:</p>
         <ol>
+            <li><strong>Allow Browser Pop-ups (CRITICAL):</strong> Navigate to <code>target.com</code>, click the lock/settings icon on the left of your address bar, and set <strong>Pop-ups and redirects</strong> to <strong>Allow</strong>. This enables the bot to open 2–3 product tabs in parallel without browser blockage.</li>
             <li><strong>HUD Verification:</strong> Open any active product page on Target.com (e.g., household item). Confirm the floating red dashboard appears in the bottom right corner.</li>
             <li><strong>Panel Controls:</strong> Click <strong>Large / Compact</strong> and the minimize <strong>−</strong> button. Drag the panel header to test screen coordinate persistence.</li>
             <li><strong>Audio Test:</strong> In <strong>🔔 Alerts & Notifications</strong>, click <strong>Test</strong> next to Audio Alerts. Confirm your browser plays the victory chime.</li>
